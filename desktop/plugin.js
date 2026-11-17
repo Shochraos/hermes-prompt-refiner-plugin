@@ -387,7 +387,7 @@ function Panel({controller, store, ctx}) {
     allowSpeed:false,
     current:{model:route?.model || '',provider:route?.provider || '',effort:s.execution.reasoning_effort || '',fast:false},
     presetFor:()=>({}),
-    select:(model,provider)=>{ const current=controller.getState(); if (canUseModelMenu(current) && current.routeInfo?.execution_support.model_override) controller.setExecution({model_override:{model,provider}}) },
+    select:(model,provider)=>{ const current=controller.getState(); if (canUseModelMenu(current) && current.routeInfo?.execution_support.model_override) controller.setExecution({model_override:{model,provider},...(current.routeInfo.execution_support.reasoning_effort ? {reasoning_effort:null} : {})}) },
     applyPreset:(preset,row)=>{ const current=controller.getState(); if (canUseModelMenu(current) && current.routeInfo?.execution_support.model_override) controller.setExecution({model_override:{model:row.model,provider:row.provider},...(current.routeInfo.execution_support.reasoning_effort ? {reasoning_effort:preset.effort === '' ? null : preset.effort ?? null} : {})}) },
     setOptions:(patch,row)=>{ const current=controller.getState(), selected=current.execution.model_override || current.routeInfo?.configured_route; if (canUseModelMenu(current) && current.routeInfo?.execution_support.reasoning_effort && patch.effort !== undefined && (sameLabels(selected,row) || current.routeInfo.execution_support.model_override)) controller.setExecution({...(sameLabels(selected,row) ? {} : {model_override:{model:row.model,provider:row.provider}}),reasoning_effort:patch.effort === '' ? null : patch.effort}) }
   }

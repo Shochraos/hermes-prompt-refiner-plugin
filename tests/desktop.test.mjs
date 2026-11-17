@@ -577,12 +577,29 @@ test('non-reasoning native selection clears hidden effort in prepared execution'
   const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:{providers:[]})
   f.setCatalog({providers:[{slug:'provider',capabilities:{other:{reasoning:false}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick()
-  const controller=f.contributions[0].render().props.controller;assert.ok(controller.getState().prepared)
+  const controller=f.contributions[0].render().props.controller;assert.ok(controller.getState().prepared);assert.equal(controller.getState().execution.reasoning_effort,'high')
   const root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
   const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,row={model:'other',provider:'provider',capabilities:{reasoning:false}}
-  catalog.select(row.model,row.provider);catalog.applyPreset({effort:undefined},row);assert.equal(controller.getState().prepared,null)
+  catalog.select(row.model,row.provider);assert.equal(controller.getState().prepared,null);assert.equal(controller.getState().execution.reasoning_effort,null)
+  assert.equal(nodes(f.render()).find(n=>n.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,true)
   click(f,'Prepare preview');await tick();const call=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)
   assert.equal(call[2].execution.reasoning_effort,null);assert.deepEqual(plain(call[2].execution.model_override),{model:'other',provider:'provider'})
+  assert.deepEqual(f.composerWrites,[]);assert.equal(f.requests.some(r=>/setting|preset|config/.test(r[1])),false)
+})
+
+test('selection omits effort without backend support and allows later effort choice when supported',async()=>{
+  for (const supported of [false,true]) {
+    const f=await load();f.setRequest(async()=>({ok:true,data:{...description,execution_support:{model_override:true,reasoning_effort:supported}}}))
+    f.setCatalog({providers:[{slug:'provider',capabilities:{other:{reasoning:true}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+    const controller=f.contributions[0].render().props.controller,root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
+    const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,writes=[],setExecution=controller.setExecution
+    controller.setExecution=values=>{writes.push(values);return setExecution(values)};catalog.select('other','provider')
+    assert.equal(Object.hasOwn(writes[0],'reasoning_effort'),supported);assert.equal(controller.getState().execution.reasoning_effort,null)
+    if (supported) {
+      const effort=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'));effort.props.onOpenChange(true)
+      nodes(f.render()).find(n=>n.props?.role==='menuitemradio' && n.props.children==='Low').props.onSelect();assert.equal(controller.getState().execution.reasoning_effort,'low')
+    }
+  }
 })
 
 test('preset rejects invalid effort and omits effort updates without backend support',async()=>{
