@@ -370,7 +370,7 @@ export default {
       const current = useValue(metadata), ready = !!current.routes && current.epoch === gatewayActivationEpoch()
       return jsxs('div',{children:[jsx(Button,{type:'button',disabled:!ready,onClick:()=>{ if (!metadata.get().routes || metadata.get().epoch !== gatewayActivationEpoch()) { void refreshMetadata(); return } if (typeof host.revealPane !== 'function') { host.notify({kind:'error',message:'Required Hermes pane API is unavailable.'}); return } void controller.open(); host.revealPane('prompt-refiner:pane') },children:'Refine'}),!ready && jsx(Button,{type:'button',disabled:current.loading,onClick:()=>void refreshMetadata(),children:current.loading ? 'Loading routes…' : 'Retry routes'})]})
     }
-    ctx.register({id:'pane',area:'panes',title:'Prompt refiner',data:{placement:'right',width:'360px'},render:()=>jsx(Panel,{controller,store,ctx})})
+    ctx.register({id:'pane',area:'panes',title:'Prompt refiner',data:{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'360px'},render:()=>jsx(Panel,{controller,store,ctx})})
     ctx.register({id:'refine',area:COMPOSER_AREAS.actions,render:()=>jsx(Action,{})})
     ctx.onDispose(()=>{ disposed = true; metadataGeneration++; controller.dispose() })
     void refreshMetadata()

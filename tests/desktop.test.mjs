@@ -16,11 +16,11 @@ const description = {configured_route:golden.expected_route,image_eligibility:'n
 const deferred = () => { let resolve; const promise = new Promise(r => {resolve=r}); return {promise,resolve} }
 function makeAtom(value) { const listeners = new Set(); return {get:()=>value,set:v=>{value=v;for(const fn of listeners)fn(value)},listen:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}} }
 async function load() {
-  const options = [], contributions = [], requests = [], disposers = [], removals = [], cancellations = [], navigations = []
+  const options = [], contributions = [], requests = [], disposers = [], removals = [], cancellations = [], navigations = [], reveals = []
   const route = {connectionId:'conn',mode:'remote',profile:'profile',targetProfile:'target'}
   const state = {focusedSessionOwner:makeAtom({connectionId:'conn',profile:'profile'}),focusedStoredSessionId:makeAtom(null),focusedSessionId:makeAtom(null)}
   let epoch = 1, draft = async () => 'stored draft', routes = async () => [route], request = async () => ({ok:true,data:description})
-  const host = {state,composer:{getDraft:id=>draft(id)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},revealPane:()=>{},navigate:path=>navigations.push(path),notify:()=>{}}
+  const host = {state,composer:{getDraft:id=>draft(id)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},revealPane:id=>reveals.push(id),navigate:path=>navigations.push(path),notify:()=>{}}
   const cache = {cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))}
   const sdk = {atom:makeAtom,useValue:a=>a.get(),useQuery:o=>{options.push(o);return {}},queryClient:cache,host,gatewayActivationEpoch:()=>epoch,COMPOSER_AREAS:{actions:'composer.actions'},Button:function Button(){},Textarea:function Textarea(){},Checkbox:function Checkbox(){}}
   const slots = []; let hook = 0
@@ -38,7 +38,7 @@ async function load() {
   })
   await mod.evaluate()
   const ctx = {register:c=>contributions.push(c),onDispose:f=>disposers.push(f),os:{writeClipboard:async()=>true},files:{}}
-  return {mod,ctx,contributions,requests,options,cache,removals,cancellations,navigations,state,route,get bitmapCalls(){return bitmapCalls},render:()=>{hook=0;const pane=contributions[0].render();return pane.type(pane.props)},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
+  return {mod,ctx,contributions,requests,options,cache,removals,cancellations,navigations,reveals,state,route,get bitmapCalls(){return bitmapCalls},render:()=>{hook=0;const pane=contributions[0].render();return pane.type(pane.props)},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
 }
 function fixture(mod, overrides={}) {
   let current, n=0
@@ -174,6 +174,15 @@ const tick = () => new Promise(resolve=>setImmediate(resolve))
 const actionNodes = f => { const action=f.contributions[1].render(); return nodes(action.type(action.props)) }
 const actionButton = f => actionNodes(f).find(n=>n.props?.children==='Refine')
 const click = (f,label) => nodes(f.render()).find(n=>n.props?.children===label).props.onClick()
+
+test('native pane is docked beside chat and revealed only by the action',async()=>{
+  const f=await load();f.mod.namespace.default.register(f.ctx);await tick()
+  const pane=f.contributions.find(c=>c.area==='panes')
+  assert.deepEqual(plain(pane.data),{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'360px'})
+  assert.deepEqual(f.reveals,[])
+  actionButton(f).props.onClick()
+  assert.deepEqual(f.reveals,['prompt-refiner:pane'])
+})
 
 test('production history picker selects only checked messages and settings action navigates',async()=>{
   const f=await load();f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime')
