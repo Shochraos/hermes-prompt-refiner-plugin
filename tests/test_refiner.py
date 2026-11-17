@@ -305,11 +305,25 @@ class RefinerTests(unittest.TestCase):
         self.assertEqual(self.run_turn(value)['result']['candidate_prompt'], wording)
         self.assertEqual(len(self.calls), 1)
 
+    def test_explicit_approval_returns_the_reviewed_wording_without_a_model_call(self):
+        for acceptance in ('Approved', 'I approve this prompt.', 'Ship it!', 'Ready as is.', 'Freigegeben!', 'Ich bin zufrieden.'):
+            with self.subTest(acceptance=acceptance):
+                value = self.raw()
+                value.update(turns=[], user_input='Explain ./build.sh, without running it.')
+                self.review(value, GERMAN_WORDING, protocol_version=2)
+                calls_before_approval = len(self.calls)
+                value['user_input'] = acceptance
+                status = self.run_turn(value, protocol_version=2)
+                self.assertEqual(status['state'], 'succeeded', status)
+                self.assertEqual(status['result']['candidate_prompt'], GERMAN_WORDING)
+                self.assertEqual(len(self.calls), calls_before_approval)
+
     def test_mixed_negative_ambiguous_and_quoted_approval_stay_in_review(self):
         value = self.raw()
         value.update(turns=[], user_input='Explain this script without running it.')
         self.review(value, GERMAN_WORDING)
         for user_input in ('Yes, but also explain its flags.', 'No, don’t use this prompt.', 'Maybe.', 'Yes?', 'Yes…',
+                           'Approved, but add examples.', 'Not approved.', 'Ship it?', '“Approved”',
                            '“Use this prompt”', '`Use this prompt`', '> Use this prompt', 'The file says “yes”.',
                            'Use this prompt\nAdd examples.', 'Ja, aber erkläre auch die Optionen.', '„Das passt so, danke!“'):
             with self.subTest(user_input=user_input):

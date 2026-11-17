@@ -188,7 +188,8 @@ export function createController(dependencies) {
     cleanJob(job)
     if (data.state !== 'succeeded') return emit({job:null, message:null, error:data.state === 'failed' ? errorText({error:data.error}) : 'The request did not return a usable result.'})
     const result = data.result, turns = [...state.turns, {role:'user',text:job.submittedInput}, {role:'assistant',text:result.assistant_reply}]
-    const patch = {job:null, turns, userInput:state.userInput === job.capturedInput ? '' : state.userInput, message:null, reportedRoute:result.reported_route, error:null, prepared:null, finalDedup:result.candidate_prompt === null ? null : {index:turns.length - 1, text:result.candidate_prompt}}
+    const reportedRoute = result.reported_route.provider || result.reported_route.model ? result.reported_route : null
+    const patch = {job:null, turns, userInput:state.userInput === job.capturedInput ? '' : state.userInput, message:null, reportedRoute, error:null, prepared:null, finalDedup:result.candidate_prompt === null ? null : {index:turns.length - 1, text:result.candidate_prompt}}
     if (result.candidate_prompt !== null) {
       if (job.candidateRevision === state.candidateRevision && job.identity.input_revision === state.revision) { patch.candidate = result.candidate_prompt; patch.proposal = null }
       else patch.proposal = result.candidate_prompt

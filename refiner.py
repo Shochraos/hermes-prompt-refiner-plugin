@@ -73,10 +73,12 @@ REVIEW_COPY = {
     ),
 }
 APPROVALS = frozenset((
+    "approved", "i approve", "i approve this prompt", "ship it", "ready as is", "use it as is",
+    "i'm satisfied", "i am satisfied", "the prompt is fine",
     "use this prompt", "yes", "yes, please", "yes, use this prompt", "looks good", "looks good, thanks",
     "sounds good", "sounds good, thanks", "that's good", "that's what i want", "that works", "that works, thanks",
     "diesen prompt verwenden", "ja", "ja, bitte", "passt", "passt so", "das passt", "das passt so",
-    "passt so, danke", "das passt so, danke", "genau so",
+    "passt so, danke", "das passt so, danke", "genau so", "freigegeben", "ich bin zufrieden",
 ))
 MESSAGES = {"incompatible_api": "Required Hermes plugin API is unavailable.", "invalid_params": "Request fields or types are invalid.", "too_large": "Input exceeds the refiner limits.", "unsupported_type": "This file type is not supported.", "invalid_encoding": "Text must be valid UTF-8.", "invalid_image": "Image data is malformed or unsupported.", "image_too_large": "Image dimensions exceed the refiner limit.", "unsafe_input": "The host refused this input.", "route_unconfigured": "Configure the independent refiner provider and model.", "route_changed": "The configured refiner changed. Prepare a new preview.", "image_not_confirmed": "Confirm this route's image compatibility in plugin settings.", "preview_required": "Prepare and inspect a new preview before sending.", "busy": "The refiner has no available request slot.", "request_conflict": "This request identity already names different content.", "job_not_found": "This job is unavailable.", "timeout": "The model request timed out. Its remote outcome may be unknown.", "model_failed": "The model request failed.", "invalid_output": "The model response did not match the required format.", "service_unloaded": "The refiner service is no longer available.", "internal_error": "The refiner could not complete this operation."}
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")

@@ -242,12 +242,14 @@ test('discussion, correction and final remain distinct and only final is copied'
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   typeMessage(f,'edited draft');review(f);await tick()
   const controller=f.contributions[0].render().props.controller
-  const finish=(reply,candidate)=>{const identity=controller.getState().job.identity;controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:reply,candidate_prompt:candidate,reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)}
+  const finish=(reply,candidate,reported_route={provider:null,model:null})=>{const identity=controller.getState().job.identity;controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:reply,candidate_prompt:candidate,reported_route,usage:null,cost:null},error:null}},identity)}
   const first=f.requests.find(r=>r[1].endsWith('prepare'))[2].input;assert.equal(first.original_draft,'');assert.equal(first.user_input,'edited draft');assert.equal(JSON.stringify(first).includes('original private draft'),false)
   finish('Working draft one. What format?',null);let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft one. What format?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
-  typeMessage(f,'Use a table');review(f);await tick();const second=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)[2].input;assert.deepEqual(plain(second.turns),[{role:'user',text:'edited draft'},{role:'assistant',text:'Working draft one. What format?'}]);finish('Working draft two. Anything else?',null)
+  typeMessage(f,'Use a table');review(f);await tick();const second=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)[2].input;assert.deepEqual(plain(second.turns),[{role:'user',text:'edited draft'},{role:'assistant',text:'Working draft one. What format?'}]);finish('Working draft two. Anything else?',null,{provider:'review-provider',model:'review-model'})
   all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft two. Anything else?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
+  assert.ok(all.some(n=>n.props?.children==='Reported by Hermes: review-provider / review-model'))
   typeMessage(f,'Approved');review(f);await tick();finish('Final wording\nReady.','Final wording');all=nodes(f.render())
+  assert.equal(all.some(n=>typeof n.props?.children==='string' && n.props.children.startsWith('Reported by Hermes:')),false)
   assert.ok(all.some(n=>Array.isArray(n.props?.children) && n.props.children[0]==='Final prompt'));assert.ok(all.some(n=>n.props?.children==='Ready.'));assert.equal(all.filter(n=>n.props?.children==='Final wording').length,0)
   const oldCopy=all.find(n=>n.props?.children==='Copy prompt');oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording'])
   typeMessage(f,'Change the tone');review(f);await tick();finish('New working draft. Is this tone right?',null);all=nodes(f.render());assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false);assert.ok(all.some(n=>n.props?.children==='New working draft. Is this tone right?'));oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording']);assert.deepEqual(f.composerWrites,[])
