@@ -215,6 +215,37 @@ test('rendered send prepares and starts once, without a review dialog',async()=>
   assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,1)
 })
 
+test('send progress stays immediately above the composer, outside conversation scrolling',async()=>{
+  const f=await load(), wait=deferred(), discussion='Long conversation line\n'.repeat(100)
+  f.setRequest(async(r,m,p)=>{
+    if(m.endsWith('describe')) return {ok:true,data:description}
+    if(m.endsWith('prepare')) return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}
+    if(m.endsWith('start')) {
+      await wait.promise
+      return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}
+    }
+    return {ok:true,data:{released:true,abandoned:false}}
+  })
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  const checkStatus = text => {
+    const pane=f.render(), siblings=pane.props.children.filter(Boolean), main=siblings.find(n=>n.type==='main')
+    const status=siblings[siblings.indexOf(main)+1], composer=siblings[siblings.indexOf(main)+2]
+    assert.equal(status.props.role,'status');assert.equal(nodes(composer).some(n=>n.type==='textarea'),true)
+    assert.deepEqual(nodes(status).map(n=>n.props?.children).filter(value=>typeof value==='string'),text ? [text] : [])
+    return nodes(main)
+  }
+  assert.ok(checkStatus(null).some(n=>n.props?.children==='Refine your prompt'))
+  typeMessage(f,'first');review(f);await tick()
+  assert.equal(checkStatus('Starting request…').some(n=>n.props?.children==='Refine your prompt'),false)
+  wait.resolve();await tick()
+  assert.equal(checkStatus('Waiting for refiner…').some(n=>n.props?.children==='Refine your prompt'),false)
+  const controller=f.contributions[0].render().props.controller, identity=controller.getState().job.identity
+  controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:discussion,candidate_prompt:null,reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
+  assert.ok(checkStatus(null).some(n=>n.props?.children===discussion))
+  typeMessage(f,'follow-up');review(f);await tick()
+  assert.ok(checkStatus('Waiting for refiner…').some(n=>n.props?.children===discussion))
+})
+
 test('only plain Enter in the message editor sends',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
   const controller=f.contributions[0].render().props.controller
@@ -305,11 +336,11 @@ test('failed prepare is visible and retries only on a new rendered send',async()
 
 test('production pane exposes one composer and no review dialog',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  let all=nodes(f.render());const inputs=all.filter(n=>n.type==='textarea' || n.type?.name==='Textarea')
+  const all=nodes(f.render()), inputs=all.filter(n=>n.type==='textarea' || n.type?.name==='Textarea')
   assert.equal(inputs.length,1);assert.equal(inputs[0].props.placeholder,'Message the refiner…')
+  assert.equal(inputs[0].props.rows,1)
   assert.equal(all.some(n=>n.props?.children==='Prepare preview'),false)
   assert.equal(all.some(n=>n.props?.children==='Review request'),false)
-  assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('charges may apply')))
 })
 
 test('model controller stays local and uses captured owner',async()=>{
@@ -363,7 +394,7 @@ test('native pane is docked beside chat and revealed only by the action',async()
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick()
   assert.equal(f.workspaces.length,0);assert.deepEqual(f.reveals,[])
   actionButton(f).props.onClick()
-  assert.equal(f.workspaces.length,1);assert.deepEqual(plain(f.workspaces[0].dock),{pane:'workspace',pos:'right'});assert.equal(f.workspaces[0].minWidth,'22rem')
+  assert.equal(f.workspaces.length,1);assert.deepEqual(plain(f.workspaces[0].dock),{pane:'workspace',pos:'right'});assert.equal(f.workspaces[0].minWidth,'min(26rem, 45vw)')
   await tick();await tick();typeMessage(f,'keep this');actionButton(f).props.onClick();assert.equal(f.workspaces.length,1);assert.deepEqual(f.reveals,['plugin-workspace:prompt-refiner'])
   f.workspaces[0].onClose();actionButton(f).props.onClick();assert.equal(f.workspaces.length,2);assert.equal(nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner').props.value,'keep this')
   f.disposers[0]();assert.equal(f.workspaces[1].closed,true);actionButton(f).props.onClick();assert.equal(f.workspaces.length,2)
@@ -626,22 +657,33 @@ test('send preserves missing API error and recovers on refresh',async()=>{
   f.setRequest(async()=>response);f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   typeMessage(f,'my message');review(f);let all=nodes(f.render())
   assert.ok(all.some(n=>n.props?.children==='Model unavailable'));assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'))
+  const transcript=nodes(all.find(n=>n.type==='main'))
+  assert.ok(transcript.some(n=>n.props?.children==='Refresh route'))
+  assert.equal(transcript.some(n=>n.props?.children==='Refine your prompt'),false)
   await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'));assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
   response={ok:true,data:{...description,configured_route:null}};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Configure the independent refiner provider and model.'))
   response={ok:true,data:description};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='fixture-model'));assert.equal(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'),false)
 })
 
-test('send displays the route and disclosure without raw metadata',async()=>{
-  const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}})
+test('composer exposes the full model label and warns only for selected images',async()=>{
+  const f=await load(), model='fixture-model-with-a-name-long-enough-to-be-truncated'
+  f.setRequest(async()=>({ok:true,data:{...description,configured_route:{...description.configured_route,model}}}))
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'my message')
-  let all=nodes(f.render());assert.ok(all.some(n=>n.props?.value==='my message'));assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('charges may apply')))
-  assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('another provider or model')))
-  assert.equal(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('Images are not redacted.')),false)
+  const checkNotice = image => {
+    const all=nodes(f.render()), visible=all.filter(n=>n.type!=='style').map(n=>typeof n.props?.children==='string'?n.props.children:'').join(' ')
+    assert.doesNotMatch(visible,/Send uploads|charges may apply|another provider or model|Captured owner|atomic owner|"user_input"|preview_digest/)
+    assert.equal(visible.includes('Images are not redacted.'),image)
+    return all
+  }
+  const all=checkNotice(false)
+  assert.ok(all.some(n=>n.props?.value==='my message'))
+  const trigger=all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation')
+  assert.equal(trigger.props['aria-description'],model);assert.ok(all.some(n=>n.props?.title===model));assert.ok(nodes(trigger).some(n=>n.props?.children===model))
   const controller=f.contributions[0].render().props.controller
-  await controller.setSelection({files:[{id:'11111111-1111-4111-8111-111111111111',kind:'image',name:'fixture.png',mime:'image/png',data_base64:'eA=='}]})
-  assert.ok(nodes(f.render()).some(n=>typeof n.props?.children==='string' && n.props.children.includes('Images are not redacted.')))
-  assert.ok(all.some(n=>n.props?.children==='fixture-model'))
-  const visible=all.map(n=>typeof n.props?.children==='string'?n.props.children:'').join(' ');assert.doesNotMatch(visible,/Captured owner|atomic owner|"user_input"|preview_digest/)
+  const text={id:'22222222-2222-4222-8222-222222222222',kind:'text',name:'notes.txt',mime:'text/plain',data_base64:'eA=='}
+  await controller.setSelection({files:[text]});checkNotice(false)
+  await controller.setSelection({files:[text,{id:'11111111-1111-4111-8111-111111111111',kind:'image',name:'fixture.png',mime:'image/png',data_base64:'eA=='}]});checkNotice(true)
+  click(f,'Remove fixture.png');await tick();checkNotice(false)
   const discard=all.find(n=>n.props?.['aria-label']==='Discard refinement');assert.equal(discard.props.variant,'ghost');assert.equal(discard.props.size,'icon-xs');assert.equal(discard.props.children.type.name,'Codicon')
 })
 
