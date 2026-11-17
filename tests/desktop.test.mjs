@@ -145,8 +145,7 @@ test('production panel creates a live status query with captured route and closu
   let nodes=collect(render()), inputs=nodes.filter(n=>n.type?.name==='Textarea')
   inputs[0].props.onChange({target:{value:'question',style:{},scrollHeight:28}})
   nodes=collect(render());nodes.find(n=>n.props?.['aria-label']==='Send').props.onClick()
-  nodes=collect(render());nodes.find(n=>n.props?.children==='Prepare preview').props.onClick();await new Promise(resolve=>setImmediate(resolve))
-  nodes=collect(render());nodes.find(n=>n.props?.children==='Send to refiner').props.onClick();await new Promise(resolve=>setImmediate(resolve))
+  await new Promise(resolve=>setImmediate(resolve))
   render();const options=f.options.at(-1)
   assert.equal(options.enabled,true);assert.equal(options.refetchInterval,3000);assert.equal(options.retry,false)
   assert.equal(JSON.stringify(options.queryKey).includes(handle.result_capability),false)
@@ -154,7 +153,7 @@ test('production panel creates a live status query with captured route and closu
   assert.equal(call[1],'plugin.prompt-refiner.status');assert.deepEqual(plain(call[0]),f.route);assert.equal(call[2].handle.result_capability,handle.result_capability)
 })
 
-test('selection forwards only explicit snapshots and stale edits invalidate the preview',async()=>{
+test('selection forwards only explicit snapshots and send prepares the current revision',async()=>{
   const f=fixture((await load()).mod),c=f.controller
   await c.open();c.setInput({userInput:'question'})
   const selected={id:'11111111-1111-4111-8111-111111111111',role:'user',sequence:0,truncated:false,text:'selected'}
@@ -162,7 +161,8 @@ test('selection forwards only explicit snapshots and stale edits invalidate the 
   const input=f.calls.find(x=>x.method.endsWith('prepare')).params.input
   assert.deepEqual(input.source_messages,[selected]);assert.deepEqual(input.files,[])
   c.editCandidate('changed');await c.send()
-  assert.equal(f.calls.some(x=>x.method.endsWith('start')),false)
+  assert.equal(f.calls.filter(x=>x.method.endsWith('start')).length,1)
+  assert.equal(f.calls.filter(x=>x.method.endsWith('prepare')).at(-1).params.input.candidate_prompt,'changed')
 })
 
 test('discard while start is in flight releases a later acknowledged job',async()=>{
@@ -175,7 +175,7 @@ test('discard while start is in flight releases a later acknowledged job',async(
     return {ok:true,data:{released:false,abandoned:true}}
   }})
   const c=f.controller;await c.open();c.setInput({draft:'x'});c.setInput({userInput:'y'});await c.prepare()
-  const sending=c.send();c.discard();wait.resolve();await sending;await new Promise(resolve=>setImmediate(resolve))
+  const sending=c.send();await tick();c.discard();wait.resolve();await sending;await new Promise(resolve=>setImmediate(resolve))
   assert.equal(f.state.origin,null);assert.ok(calls.includes('plugin.prompt-refiner.release'));assert.equal(f.removals.length,1)
 })
 
@@ -196,14 +196,91 @@ const pick = (f,label) => { nodes(f.render()).find(n=>n.type?.name==='DropdownMe
 const typeMessage = (f,value) => nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner').props.onChange({target:{value,style:{},scrollHeight:28}})
 const review = f => nodes(f.render()).find(n=>n.props?.['aria-label']==='Send').props.onClick()
 
-test('production pane exposes one composer and review before upload',async()=>{
+test('rendered send prepares and starts once, without a review dialog',async()=>{
+  const f=await load(), wait=deferred()
+  f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?wait.promise:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'hello')
+  const send=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send');send.props.onClick();send.props.onClick();await tick()
+  assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,1)
+  assert.equal(nodes(f.render()).some(n=>n.props?.children==='Review request'),false)
+  const request=f.requests.find(r=>r[1].endsWith('prepare'))[2]
+  wait.resolve({ok:true,data:{...golden,input_revision:request.input_revision,expected_route:request.expected_route,execution:request.execution,redacted:false}});await tick();await tick()
+  assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,1)
+})
+
+test('discussion, correction and final remain distinct and only final is copied',async()=>{
+  const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return true}
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async()=> 'original private draft')
+  f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,prepared:p.input,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+  typeMessage(f,'edited draft');review(f);await tick()
+  const controller=f.contributions[0].render().props.controller
+  const finish=(reply,candidate)=>{const identity=controller.getState().job.identity;controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:reply,candidate_prompt:candidate,reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)}
+  const first=f.requests.find(r=>r[1].endsWith('prepare'))[2].input;assert.equal(first.original_draft,'');assert.equal(first.user_input,'edited draft');assert.equal(JSON.stringify(first).includes('original private draft'),false)
+  finish('Working draft one. What format?',null);let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft one. What format?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
+  typeMessage(f,'Use a table');review(f);await tick();const second=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)[2].input;assert.deepEqual(plain(second.turns),[{role:'user',text:'edited draft'},{role:'assistant',text:'Working draft one. What format?'}]);finish('Working draft two. Anything else?',null)
+  all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft two. Anything else?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
+  typeMessage(f,'Approved');review(f);await tick();finish('Final wording\nReady.','Final wording');all=nodes(f.render())
+  assert.ok(all.some(n=>Array.isArray(n.props?.children) && n.props.children[0]==='Final prompt'));assert.ok(all.some(n=>n.props?.children==='Ready.'));assert.equal(all.filter(n=>n.props?.children==='Final wording').length,0)
+  const oldCopy=all.find(n=>n.props?.children==='Copy prompt');oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording'])
+  typeMessage(f,'Change the tone');review(f);await tick();finish('New working draft. Is this tone right?',null);all=nodes(f.render());assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false);assert.ok(all.some(n=>n.props?.children==='New working draft. Is this tone right?'));oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording']);assert.deepEqual(f.composerWrites,[])
+})
+
+for (const change of ['discard','selection','refresh']) {
+  test(`one-click send does not start after ${change} during preparation`,async()=>{
+    const f=await load(),wait=deferred();let request
+    f.setRequest(async(r,m,p)=>{if(m.endsWith('describe'))return {ok:true,data:description};if(m.endsWith('prepare')){request=p;return wait.promise}throw new Error('unexpected start')})
+    f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'keep input');review(f);await tick()
+    const controller=f.contributions[0].render().props.controller
+    if(change==='discard')controller.discard()
+    if(change==='selection')await controller.setSelection({messages:[]})
+    if(change==='refresh')await controller.refreshRoute()
+    wait.resolve({ok:true,data:{...golden,input_revision:request.input_revision,expected_route:request.expected_route,execution:request.execution,redacted:false}});await tick();await tick()
+    assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,0)
+    if(change!=='discard'){assert.equal(controller.getState().userInput,'keep input');assert.equal(controller.getState().job,null)}
+  })
+}
+
+test('discard while route lookup waits prevents the prepared request from starting',async()=>{
+  const f=await load(),routeWait=deferred();let hold=false
+  f.setRoutes(()=>hold?routeWait.promise:Promise.resolve([f.route]))
+  f.setRequest(async(r,m,p)=>{if(m.endsWith('describe'))return {ok:true,data:description};if(m.endsWith('prepare')){hold=true;return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}}throw new Error('unexpected start')})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'hello');review(f);await tick()
+  assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,1);click(f,'Discard refinement');routeWait.resolve([f.route]);await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,0)
+})
+
+test('refresh retires an in-flight job and rejects its late result',async()=>{
+  const f=fixture((await load()).mod),c=f.controller;await c.open();c.setInput({userInput:'keep this'});await c.send()
+  const identity=f.state.job.identity;await c.refreshRoute();assert.equal(f.state.job,null)
+  c.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:'late',candidate_prompt:'obsolete',reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
+  assert.deepEqual(plain(f.state.turns),[]);assert.equal(f.state.userInput,'keep this');assert.equal(f.state.candidate,'');await tick();assert.ok(f.calls.some(x=>x.method.endsWith('release')))
+})
+
+test('stale send handlers cannot send newer input or a changed route',async()=>{
+  const f=await load();let desc=description
+  f.setRequest(async(r,m)=>m.endsWith('describe')?{ok:true,data:desc}:{ok:false,error:{code:'busy',message:'The refiner has no available request slot.'}})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'first')
+  const oldInputSend=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send');typeMessage(f,'newer');oldInputSend.props.onClick();await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  const oldRouteSend=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send'),controller=f.contributions[0].render().props.controller
+  desc={...description,configured_route:{provider:'new',model:'route'}};await controller.refreshRoute();oldRouteSend.props.onClick();await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  review(f);await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,1)
+})
+
+test('failed prepare is visible and retries only on a new rendered send',async()=>{
+  const f=await load();let attempts=0
+  f.setRequest(async(r,m,p)=>{if(m.endsWith('describe'))return {ok:true,data:description};if(m.endsWith('prepare')){attempts++;return attempts===1?{ok:false,error:{code:'busy',message:'The refiner has no available request slot.'}}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}}if(m.endsWith('start'))return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}};return {ok:true,data:{released:true,abandoned:false}}})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'retry me');review(f);await tick();await tick()
+  assert.equal(attempts,1);assert.ok(nodes(f.render()).some(n=>n.props?.children==='The refiner has no available request slot.'));assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,0)
+  review(f);await tick();assert.equal(attempts,2);assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,1)
+})
+
+test('production pane exposes one composer and no review dialog',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   let all=nodes(f.render());const inputs=all.filter(n=>n.type?.name==='Textarea')
   assert.equal(inputs.length,1);assert.equal(inputs[0].props.placeholder,'Message the refiner…')
   assert.equal(all.some(n=>n.props?.children==='Prepare preview'),false)
-  all.find(n=>n.props?.['aria-label']==='Send').props.onClick();all=nodes(f.render())
-  assert.ok(all.some(n=>n.props?.children==='Prepare preview'))
-  assert.equal(f.requests.some(r=>r[1].endsWith('prepare')),false)
+  assert.equal(all.some(n=>n.props?.children==='Review request'),false)
+  assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('charges may apply')))
 })
 
 test('model controller stays local and uses captured owner',async()=>{
@@ -266,7 +343,7 @@ test('production history picker selects only checked messages and settings actio
   click(f,'Refresh history');await tick();await tick()
   const choices=nodes(f.render()).filter(n=>n.type?.name==='Checkbox');assert.equal(choices.length,2);choices[0].props.onCheckedChange(true);await tick()
   click(f,'Done');typeMessage(f,'question');review(f)
-  click(f,'Prepare preview');await tick();const call=f.requests.find(r=>r[1].endsWith('prepare'))
+  await tick();const call=f.requests.find(r=>r[1].endsWith('prepare'))
   assert.deepEqual(call[2].input.source_messages.map(m=>m.text),['selected']);assert.equal(call[2].session_id,undefined)
   const transcript=f.requests.find(r=>r[1]==='session.transcript');assert.equal(transcript[2].session_id,'stored');assert.equal(transcript[2].inline_images,false)
 })
@@ -278,7 +355,7 @@ test('production file picker reads only chosen file and forwards selected bytes'
   pick(f,'Files');click(f,'Choose folder');await tick();await tick();click(f,'Add notes.txt');await tick();await tick()
   assert.deepEqual(reads,[['stat','grant','notes.txt'],['read','grant','notes.txt']])
   assert.ok(nodes(f.render()).some(n=>typeof n.props?.children==='string' && n.props.children.includes('notes.txt')))
-  click(f,'Done');typeMessage(f,'question');review(f);click(f,'Prepare preview');await tick()
+  click(f,'Done');typeMessage(f,'question');review(f);await tick()
   const files=f.requests.find(r=>r[1].endsWith('prepare'))[2].input.files
   assert.equal(files.length,1);assert.equal(files[0].name,'notes.txt');assert.equal(files[0].data_base64,'dGVzdA==')
 })
@@ -473,7 +550,7 @@ test('execution validation rejects extra fields, whitespace and changed preview 
   for(const values of [{unexpected:1},{model_override:{provider:' p',model:'m'}},{reasoning_effort:'HIGH'},{model_override:{provider:'p',model:'m',extra:1}}]) {c.setExecution(values);assert.equal(f.state.error,'Request fields or types are invalid.')}
   let responseExecution={model_override:null,reasoning_effort:'low'}
   const g=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:responseExecution,redacted:false}}})
-  await g.controller.open();g.controller.setInput({userInput:'x'});await g.controller.prepare();assert.equal(g.state.prepared,null);assert.equal(g.state.error,'Invalid preview response.')
+  await g.controller.open();g.controller.setInput({userInput:'x'});await g.controller.prepare();assert.equal(g.state.prepared,null);assert.equal(g.state.error,'Invalid preparation response.')
   responseExecution={model_override:null,reasoning_effort:'high',extra:true};await g.controller.prepare();assert.equal(g.state.prepared,null)
 })
 
@@ -494,22 +571,26 @@ test('unsupported RPC is distinguished without exposing backend messages',async(
   const f=fixture((await load()).mod,{requestProfile:async()=>({error:{code:-32601,message:'secret'}})});await f.controller.open();assert.equal(f.state.error,'Required Hermes plugin API is unavailable.')
 })
 
-test('review preserves missing API error through prepare and recovers on refresh',async()=>{
+test('send preserves missing API error and recovers on refresh',async()=>{
   const f=await load();let response={error:{code:-32601,message:'private'}}
   f.setRequest(async()=>response);f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   typeMessage(f,'my message');review(f);let all=nodes(f.render())
   assert.ok(all.some(n=>n.props?.children==='Model unavailable'));assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'))
-  click(f,'Prepare preview');await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'));assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
-  response={ok:true,data:{...description,configured_route:null}};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='No model configured'))
-  response={ok:true,data:description};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Model: openai-codex / fixture-model'));assert.equal(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'),false)
+  await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'));assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  response={ok:true,data:{...description,configured_route:null}};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Configure the independent refiner provider and model.'))
+  response={ok:true,data:description};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='fixture-model'));assert.equal(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'),false)
 })
 
-test('review displays readable content and distinct consent without raw metadata',async()=>{
+test('send displays the route and disclosure without raw metadata',async()=>{
   const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}})
-  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'my message');review(f)
-  let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='my message'));assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('Send to refiner sends it to a model provider')))
-  assert.ok(all.some(n=>n.props?.children==='Hermes may send selected content to another provider or model, regardless of the selection shown. Images are not redacted.'))
-  click(f,'Prepare preview');await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children===golden.prepared.user_input));assert.ok(all.some(n=>n.props?.children==='Keine Builds.\n'));assert.ok(all.some(n=>n.props?.children==='Send to refiner'))
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'my message')
+  let all=nodes(f.render());assert.ok(all.some(n=>n.props?.value==='my message'));assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('charges may apply')))
+  assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('another provider or model')))
+  assert.equal(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('Images are not redacted.')),false)
+  const controller=f.contributions[0].render().props.controller
+  await controller.setSelection({files:[{id:'11111111-1111-4111-8111-111111111111',kind:'image',name:'fixture.png',mime:'image/png',data_base64:'eA=='}]})
+  assert.ok(nodes(f.render()).some(n=>typeof n.props?.children==='string' && n.props.children.includes('Images are not redacted.')))
+  assert.ok(all.some(n=>n.props?.children==='fixture-model'))
   const visible=all.map(n=>typeof n.props?.children==='string'?n.props.children:'').join(' ');assert.doesNotMatch(visible,/Captured owner|atomic owner|"user_input"|preview_digest/)
   const discard=all.find(n=>n.props?.['aria-label']==='Discard refinement');assert.equal(discard.props.variant,'ghost');assert.equal(discard.props.size,'icon-xs');assert.equal(discard.props.children.type.name,'Codicon')
 })
@@ -572,7 +653,7 @@ test('busy model selection cannot alter execution',async()=>{
   let all=nodes(f.render());assert.equal(all.some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
   const modelRoot=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));modelRoot.props.onOpenChange(true)
   const staleCatalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu'),staleReset=nodes(f.render()).find(n=>n.props?.children==='Use configured refiner')
-  typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick();click(f,'Send to refiner');await tick()
+  typeMessage(f,'hello');review(f);await tick()
   all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true)
   modelRoot.props.onOpenChange(true);staleCatalog.props.controller.select('other','provider');staleCatalog.props.controller.applyPreset({effort:'low'},{model:'other',provider:'provider'});staleReset.props.onSelect();await assert.rejects(staleCatalog.props.request('model.options',{}),/model catalog unavailable/)
   assert.equal(nodes(f.render()).some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.equal(f.contributions[0].render().props.controller.getState().execution.model_override,null)
@@ -585,14 +666,14 @@ test('panel removes selected context and files before preview',async()=>{
   f.ctx.files={requestFolder:async()=>({ok:true,folder:{id:'g',name:'folder'}}),list:async()=>({ok:true,entries:[{name:'notes.txt',path:'notes.txt',isDirectory:false}]}),stat:async()=>({ok:true,exists:true,isDirectory:false,size:4}),readDataUrl:async()=>({ok:true,url:'data:text/plain;base64,dGVzdA=='})}
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();pick(f,'Chat context');click(f,'Refresh history');await tick();await tick();nodes(f.render()).find(n=>n.type?.name==='Checkbox').props.onCheckedChange(true);await tick();click(f,'Done')
   pick(f,'Files');click(f,'Choose folder');await tick();await tick();click(f,'Add notes.txt');await tick();await tick();click(f,'Done')
-  click(f,'Remove context');await tick();click(f,'Remove notes.txt');await tick();typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick()
+  click(f,'Remove context');await tick();click(f,'Remove notes.txt');await tick();typeMessage(f,'hello');review(f);await tick()
   const input=f.requests.find(r=>r[1].endsWith('prepare'))[2].input;assert.deepEqual(plain(input.source_messages),[]);assert.deepEqual(plain(input.files),[])
 })
 
 test('panel copy sends only candidate text and reports clipboard acknowledgement',async()=>{
   const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return true};f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');
   f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
-  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick();click(f,'Send to refiner');await tick()
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'hello');review(f);await tick()
   const pane=f.contributions[0].render(),controller=pane.props.controller,identity=controller.getState().job.identity
   controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:'Reply',candidate_prompt:'candidate only',reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
   click(f,'Copy prompt');await tick();assert.deepEqual(copies,['candidate only']);assert.deepEqual(f.composerWrites,[]);assert.ok(nodes(f.render()).some(n=>n.props?.children==='Copied prompt. Paste it and reattach any required files yourself.'))
@@ -602,14 +683,14 @@ test('panel copy sends only candidate text and reports clipboard acknowledgement
 test('model selection keeps saved effort and sends no override',async()=>{
   const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:{providers:[]})
   f.setCatalog({providers:[{slug:'provider',capabilities:{other:{reasoning:false}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick()
-  const controller=f.contributions[0].render().props.controller;assert.ok(controller.getState().prepared);assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
+  typeMessage(f,'hello')
+  const controller=f.contributions[0].render().props.controller;assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
   const root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
   const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,row={model:'other',provider:'provider',capabilities:{reasoning:false}}
   catalog.select(row.model,row.provider);assert.equal(controller.getState().prepared,null);assert.equal(controller.getState().execution.reasoning_effort,null)
   assert.equal(nodes(f.render()).some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
   assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
-  click(f,'Prepare preview');await tick();const call=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)
+  review(f);await tick();const call=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)
   assert.equal(call[2].execution.reasoning_effort,null);assert.deepEqual(plain(call[2].execution.model_override),{model:'other',provider:'provider'})
   assert.deepEqual(f.composerWrites,[]);assert.equal(f.requests.some(r=>/setting|preset|config/.test(r[1])),false)
 })
