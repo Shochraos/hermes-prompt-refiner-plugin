@@ -305,3 +305,42 @@ test('dispose suppresses pending prewarm completion',async()=>{
   f.mod.namespace.default.register(f.ctx);f.disposers[0]();wait.resolve([f.route]);await tick()
   assert.equal(actionButton(f).props.disabled,true);actionButton(f).props.onClick();await tick();assert.equal(reads,0);assert.equal(f.requests.length,0)
 })
+
+for (const change of ['draft','history','files']) {
+  test(`${change} edits during a request preserve the visible candidate and separate the stale proposal`,async()=>{
+    const f=fixture((await load()).mod),c=f.controller
+    await c.open();c.setInput({draft:'draft'});c.setInput({userInput:'refine'});await c.prepare();await c.send()
+    const identity=f.state.job.identity, candidate=f.state.candidate
+    if (change === 'draft') c.setInput({draft:'new draft'})
+    if (change === 'history') await c.setSelection({messages:[{id:'11111111-1111-4111-8111-111111111111',role:'user',sequence:0,truncated:false,text:'new history'}]})
+    if (change === 'files') await c.setSelection({files:[{id:'22222222-2222-4222-8222-222222222222',kind:'text',name:'new.txt',mime:'text/plain',data_base64:'bmV3'}]})
+    c.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:'Old reply',candidate_prompt:'Old-input proposal',reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
+    assert.equal(f.state.candidate,candidate);assert.equal(f.state.proposal,'Old-input proposal');assert.equal(f.state.job,null)
+    c.applyProposal();assert.equal(f.state.candidate,'Old-input proposal');assert.equal(f.state.prepared,null)
+  })
+}
+
+for (const [code,message] of [['job_not_found','This job is unavailable.'],['service_unloaded','The refiner service is no longer available.']]) {
+  test(`${code} settles locally without discarding content or automatically restarting`,async()=>{
+    const calls=[]
+    const f=fixture((await load()).mod,{requestProfile:async(route,method,params)=>{
+      calls.push({method,params:plain(params)})
+      if (method.endsWith('describe')) return {ok:true,data:description}
+      if (method.endsWith('prepare')) return {ok:true,data:{...golden,input_revision:params.input_revision,redacted:false}}
+      if (method.endsWith('start')) return {ok:true,data:{identity:params.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}
+      return {ok:false,error:{code,message}}
+    }}),c=f.controller
+    await c.open();c.setInput({draft:'draft'});c.setInput({userInput:'refine'});await c.prepare();await c.send();c.editCandidate('Keep this candidate')
+    const job=f.state.job, turns=plain(f.state.turns), input=f.state.userInput
+    c.acceptStatus({ok:false,error:{code,message}},job.identity);await tick()
+    assert.equal(f.state.job,null);assert.equal(f.state.prepared,null);assert.equal(f.state.message,null)
+    assert.equal(f.state.candidate,'Keep this candidate');assert.equal(f.state.userInput,input);assert.deepEqual(plain(f.state.turns),turns)
+    assert.match(f.state.error,/previous request may have run/)
+    assert.deepEqual(f.cancellations,[{queryKey:plain(job.queryKey),exact:true}]);assert.deepEqual(f.removals,[{queryKey:plain(job.queryKey),exact:true}])
+    assert.equal(calls.filter(call=>call.method.endsWith('start')).length,1)
+    c.acceptStatus({ok:true,data:{identity:job.identity,state:'succeeded',result:{assistant_reply:'late',candidate_prompt:'late',reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},job.identity)
+    assert.equal(f.state.candidate,'Keep this candidate')
+    c.setInput({userInput:'Try again explicitly'});await c.prepare();assert.ok(f.state.prepared);await c.send()
+    assert.ok(f.state.job);assert.equal(calls.filter(call=>call.method.endsWith('start')).length,2)
+  })
+}

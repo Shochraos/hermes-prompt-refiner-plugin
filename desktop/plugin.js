@@ -145,7 +145,13 @@ export function createController(dependencies) {
   function acceptStatus(response, identity) {
     const job = state.job
     if (!job?.handle || !sameIdentity(identity,job.identity)) return state
-    if (failureValid(response)) return emit({error:errorText(response)})
+    if (failureValid(response)) {
+      if (['job_not_found','service_unloaded'].includes(response.error.code)) {
+        cleanJob(job)
+        return emit({job:null, prepared:null, message:null, error:`${errorText(response)} Prepare a fresh preview before trying again; the previous request may have run.`})
+      }
+      return emit({error:errorText(response)})
+    }
     let data
     try { data = envelope(response) } catch { return emit({error:'Invalid job status.'}) }
     if (!statusValid(data) || !sameIdentity(data.identity,job.identity)) return emit({error:'Invalid job status.'})
@@ -156,7 +162,7 @@ export function createController(dependencies) {
     const result = data.result, turns = [...state.turns, {role:'user',text:job.submittedInput}, {role:'assistant',text:result.assistant_reply}]
     const patch = {job:null, turns, userInput:'', message:null, reportedRoute:result.reported_route, error:null, prepared:null}
     if (result.candidate_prompt !== null) {
-      if (job.candidateRevision === state.candidateRevision) patch.candidate = result.candidate_prompt
+      if (job.candidateRevision === state.candidateRevision && job.identity.input_revision === state.revision) patch.candidate = result.candidate_prompt
       else patch.proposal = result.candidate_prompt
     }
     return emit(patch)
