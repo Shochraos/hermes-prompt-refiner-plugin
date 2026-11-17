@@ -375,6 +375,7 @@ test('composer uses compact native glyphs and one solid Send accent',async()=>{
   assert.equal(input.type,'textarea')
   assert.ok(nodes(model).some(n=>n.type==='svg' && n.props['aria-hidden']===true))
   assert.match(css,/\.pr-route-pill\{[^}]*font-size:var\(--text-xs,\.75rem\)[^}]*font-weight:400/)
+  assert.doesNotMatch(css,/\.pr-route-controls\{[^}]*max-width:/)
   assert.match(css,/\.pr-input\{[^}]*field-sizing:content/)
   assert.doesNotMatch(css,/\b[\d.]+cq[ibwh]\b/)
   assert.match(css,/\.pr-send\{[^}]*background:var\(--dt-primary\);color:var\(--dt-primary-foreground\)/)
