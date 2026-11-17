@@ -49,7 +49,7 @@ const resultValid = r => closed(r,['assistant_reply','candidate_prompt','reporte
 const statusValid = d => closed(d,['identity','state','result','error']) && (d.state === 'succeeded' ? resultValid(d.result) && d.error === null : d.state === 'failed' ? d.result === null && errorValid(d.error) : ['pending','abandoned'].includes(d.state) && d.result === null && d.error === null)
 const snapshotValue = value => { if (Array.isArray(value)) return Object.freeze(value.map(snapshotValue)); if (value && typeof value === 'object') return Object.freeze(Object.fromEntries(Object.entries(value).map(([k,v])=>[k,snapshotValue(v)]))); return value }
 const errorText = response => errorValid(response?.error) ? ({route_changed:'The configured refiner changed. Send again.',preview_required:'Send again to prepare a new request.'}[response.error.code] || errors[response.error.code]) : errors.internal_error
-const initial = () => ({ origin:null, refinementId:null, revision:0, candidateRevision:0, draft:'', userInput:'', candidate:'', finalDedup:null, execution:{model_override:null,reasoning_effort:null}, selection:[], files:[], turns:[], prepared:null, routeInfo:null, routeState:'unknown', routeError:null, job:null, proposal:null, error:null, message:null, opening:false })
+const initial = () => ({ origin:null, refinementId:null, revision:0, candidateRevision:0, draft:'', userInput:'', candidate:'', showCandidate:false, finalDedup:null, execution:{model_override:null,reasoning_effort:null}, selection:[], files:[], turns:[], prepared:null, routeInfo:null, routeState:'unknown', routeError:null, job:null, proposal:null, error:null, message:null, opening:false })
 
 export function createController(dependencies) {
   const { captureOrigin, requestProfile, readSelectedFile, writeClipboard, queryClient: cache, newId, publish } = dependencies
@@ -126,7 +126,7 @@ export function createController(dependencies) {
       return invalidate({selection: selected.messages ?? state.selection, files})
     } catch { if (live(g) && revision === state.revision) return emit({error:'File unavailable or unsupported. Reselect files.'}); return state }
   }
-  function editCandidate(text) { return invalidate({candidate:text, candidateRevision:state.candidateRevision + 1}) }
+  function editCandidate(text) { return invalidate({candidate:text, showCandidate:true, candidateRevision:state.candidateRevision + 1}) }
   async function prepare(pending = null) {
     if (!state.origin || (state.job && state.job !== pending)) return state
     if (!state.routeInfo) return emit({error:state.routeError || (state.routeState === 'loading' ? 'Loading model information…' : 'Model information unavailable. Refresh the route.')})
@@ -166,7 +166,7 @@ export function createController(dependencies) {
       if (!closed(data,['identity','handle']) || !sameIdentity(data.identity,identity) || !closed(handle,['job_id','result_capability']) || typeof handle.job_id !== 'string' || !/^[0-9a-f]{32}$/.test(handle.job_id) || typeof handle.result_capability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(handle.result_capability)) throw new Error('invalid')
       const job = {origin, identity, handle, candidateRevision, queryKey, submittedInput:prepared.prepared.user_input, capturedInput:submittedInput}
       if (!live(g) || revision !== state.revision || routeRequest !== routeGeneration || !sameExecution(state.execution,prepared.execution) || !sameLabels(effectiveRoute(),prepared.expected_route)) { cleanJob(job); if (live(g) && state.job?.identity.request_id === identity.request_id) return emit({job:null,message:null}); return state }
-      return emit({job, message:'Waiting for refiner…'})
+      return emit({job, message:'Refiner is thinking...'})
     } catch (error) { if (live(g) && state.job?.identity.request_id === identity.request_id) return emit({job:null, message:null, error:error?.code === -32601 ? errors.incompatible_api : 'Start acknowledgement was not received. The request may have run; a new attempt may incur model use.'}); return state }
   }
   function acceptStatus(response, identity) {
@@ -190,12 +190,12 @@ export function createController(dependencies) {
     const reportedRoute = result.reported_route.provider || result.reported_route.model ? result.reported_route : null
     const patch = {job:null, turns, userInput:state.userInput === job.capturedInput ? '' : state.userInput, message:null, reportedRoute, error:null, prepared:null, finalDedup:result.candidate_prompt === null ? null : {index:turns.length - 1, text:result.candidate_prompt}}
     if (result.candidate_prompt !== null) {
-      if (job.candidateRevision === state.candidateRevision && job.identity.input_revision === state.revision) { patch.candidate = result.candidate_prompt; patch.proposal = null }
+      if (job.candidateRevision === state.candidateRevision && job.identity.input_revision === state.revision) { patch.candidate = result.candidate_prompt; patch.showCandidate = true; patch.proposal = null }
       else patch.proposal = result.candidate_prompt
-    } else if (job.candidateRevision === state.candidateRevision) { patch.candidate = ''; patch.proposal = null }
+    } else if (job.candidateRevision === state.candidateRevision) { patch.candidate = ''; patch.showCandidate = false; patch.proposal = null }
     return emit(patch)
   }
-  function applyProposal() { if (state.proposal === null) return state; return invalidate({candidate:state.proposal, proposal:null, candidateRevision:state.candidateRevision + 1}) }
+  function applyProposal() { if (state.proposal === null) return state; return invalidate({candidate:state.proposal, showCandidate:true, proposal:null, candidateRevision:state.candidateRevision + 1}) }
   async function copy() {
     const g = generation, candidate = state.candidate
     if (!candidate || !safeText(candidate,32768)) return emit({error:'No valid candidate to copy.'})
@@ -375,14 +375,13 @@ function Panel({controller, store, ctx}) {
     } catch { if (controller.getState().refinementId === id) setFileError('File unavailable, unsafe, too large or unsupported. Reselect files.') }
   }
   const button = (label, onClick, disabled = false) => jsx(Button,{type:'button',variant:'secondary',onClick,disabled,children:label})
-  const field = (label, value, onChange, disabled = false) => jsxs('label',{className:'flex flex-col gap-1',children:[label,jsx(Textarea,{className:'pr-prose',value,onChange:e => onChange(e.target.value),disabled})]})
   const prose = text => jsx('div',{className:'pr-prose',children:text})
   if (!s.origin) return jsx('div',{className:'flex h-full min-h-0 flex-col text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:jsxs('main',{className:'grid min-h-0 flex-1 place-items-center p-4 text-(--ui-text-tertiary)',children:[jsx('div',{className:'text-base',children:'Refine your prompt'}),s.error && jsx('p',{role:'alert',children:s.error})]})})
   const route = s.routeInfo ? s.execution.model_override || s.routeInfo.configured_route : null
   const modelLabel = route?.model || 'Model unavailable'
   const statusMessage = job && status.isError ? 'Status unavailable. The request may still be running.' : s.message
   const showRecovery = s.routeState !== 'ready' || !!s.error
-  const showEmpty = !s.turns.length && !s.candidate && s.proposal === null && !s.reportedRoute && !s.job && !statusMessage && !showRecovery
+  const showEmpty = !s.turns.length && !s.showCandidate && s.proposal === null && !s.reportedRoute && !s.job && !statusMessage && !showRecovery
   const support = s.routeInfo?.execution_support
   const sameDiscussion = current => current.refinementId === refinementId && !!current.origin && sameRoute(current.origin.route,owner)
   const canEdit = current => sameDiscussion(current) && !current.job
@@ -405,52 +404,66 @@ function Panel({controller, store, ctx}) {
     setOptions:()=>{}
   }
   const resize = value => setManualHeight(Math.max(28,Math.min(160,value)))
-  const chevron = jsx('svg',{viewBox:'0 0 12 12','aria-hidden':true,children:jsx('path',{d:'m3 4.5 3 3 3-3'})})
+  const chevron = jsx('svg',{viewBox:'0 0 24 24','aria-hidden':true,fill:'none',stroke:'currentColor',strokeWidth:2,strokeLinecap:'round',strokeLinejoin:'round',children:jsx('path',{d:'M6 9l6 6l6 -6'})})
   const menu = jsxs('div',{className:'pr-route-controls',title:modelLabel,children:[
-    jsx(DropdownMenu,{open:modelOpen && canUseModelMenu(s),onOpenChange:open=>{if (!open || canUseModelMenu(controller.getState())) setModelOpen(open)},children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsxs('button',{type:'button',className:'pr-route-pill',disabled:!canUseModelMenu(s) || (!support?.model_override && !s.execution.model_override),'aria-label':'Refiner model for this conversation','aria-description':modelLabel,children:[jsx('span',{children:modelLabel}),chevron]})}),modelOpen && canUseModelMenu(s) && jsx(DropdownMenuContent,{align:'end',className:'w-72 p-0',children:jsxs(ModelMenuCloseContext.Provider,{value:()=>setModelOpen(false),children:[jsx(DropdownMenuItem,{onSelect:()=>{const current=controller.getState();if(canUseModelMenu(current)) controller.setExecution({model_override:null})},children:'Use configured refiner'}),jsx(ModelCatalogMenu,{selectionOnly:true,controller:menuController,request:async(method,params)=>{if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');if(!canUseModelMenu(controller.getState())) throw new Error('model catalog unavailable');const result=await routed(owner,method,params);if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');if(!canUseModelMenu(controller.getState())) throw new Error('model catalog unavailable');return result},ownerConnectionId:owner.connectionId,profile:owner.targetProfile})]})})]})})
+    jsx(DropdownMenu,{open:modelOpen && canUseModelMenu(s),onOpenChange:open=>{if (!open || canUseModelMenu(controller.getState())) setModelOpen(open)},children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsxs(Button,{type:'button',variant:'ghost',className:'pr-route-pill',disabled:!canUseModelMenu(s) || (!support?.model_override && !s.execution.model_override),'aria-label':'Refiner model for this conversation','aria-description':modelLabel,children:[jsx('span',{children:modelLabel}),chevron]})}),modelOpen && canUseModelMenu(s) && jsx(DropdownMenuContent,{align:'end',className:'w-72 p-0',children:jsxs(ModelMenuCloseContext.Provider,{value:()=>setModelOpen(false),children:[jsx(DropdownMenuItem,{onSelect:()=>{const current=controller.getState();if(canUseModelMenu(current)) controller.setExecution({model_override:null})},children:'Use configured refiner'}),jsx(ModelCatalogMenu,{selectionOnly:true,controller:menuController,request:async(method,params)=>{if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');if(!canUseModelMenu(controller.getState())) throw new Error('model catalog unavailable');const result=await routed(owner,method,params);if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');if(!canUseModelMenu(controller.getState())) throw new Error('model catalog unavailable');return result},ownerConnectionId:owner.connectionId,profile:owner.targetProfile})]})})]})})
   ]})
   const contextDialog = jsxs('div',{className:'space-y-2',children:[jsx('p',{children:'Stored display projection may be incomplete or truncated. Compaction and tool rows cannot be selected. Attachments are not fetched.'}),s.origin.storedId ? button('Refresh history',()=>void loadHistory(false)) : jsx('p',{children:'No stored chat is available.'}),cursor && button('Load earlier',()=>void loadHistory(true)),historyError && jsx('p',{role:'alert',children:historyError}),...history.map(row=>jsxs('div',{className:'my-2',children:[row.row_kind === 'message' && ['user','assistant'].includes(row.role) && typeof row.text === 'string' ? jsx(Checkbox,{checked:s.selection.some(m=>m.id===row.localId),onCheckedChange:value=>selectHistory(row,value === true),'aria-label':`Select ${row.role} message`}) : null,jsx('span',{children:` ${row.role || row.row_kind}${row.truncated ? ' (truncated)' : ''}`}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:typeof row.text === 'string' ? row.text : '[non-selectable entry]'})]},row.localId))]})
   const fileDialog = jsxs('div',{className:'space-y-2',children:[jsx('p',{children:'Folder access persists until revoked in Capabilities → Plugins → Folder access. Only selected files are read. PDF and Office files are not supported.'}),button('Choose folder',()=>void openFolder()),fileError && jsx('p',{role:'alert',children:fileError}),folder && jsxs('div',{children:[jsx('p',{children:`${folder.name}${path ? ` / ${path}` : ''}`}),path && button('Up',()=>void listFolder(folder,path.split('/').slice(0,-1).join('/'),s.refinementId)),...entries.filter(entry=>entry.isDirectory || (dialog === 'Images' ? !!imageExtensions[entry.name.split('.').pop().toLowerCase()] : !imageExtensions[entry.name.split('.').pop().toLowerCase()])).map(entry=>button(entry.isDirectory ? `${entry.name}/` : `Add ${entry.name}`,()=>entry.isDirectory ? void listFolder(folder,entry.path,s.refinementId) : void addFile(entry)))]})]})
 
   return jsxs('div',{className:'pr-pane flex h-full min-h-0 flex-col overflow-hidden text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:[jsx('style',{children:`
-    .pr-pane{container:pr-pane / inline-size;min-width:0;--pr-type-adjust:min(0rem,1.5cqi - .5rem);--pr-prose-size:calc(var(--conversation-text-base-size,.8125rem) * var(--chat-text-scale,1));--pr-model-size:var(--text-sm,.875rem);--pr-composer-inset:clamp(.375rem,1.8cqi,.625rem)}
+    .pr-pane{min-width:0;--pr-prose-size:calc(var(--conversation-text-base-size,.8125rem) * var(--chat-text-scale,1));--pr-composer-inset:1rem}
     .pr-status,.pr-composer{flex:none}
     .pr-status:not(:empty){padding:.25rem var(--pr-composer-inset) 0;overflow-wrap:anywhere}
-    .pr-composer{padding:var(--pr-composer-inset)}
-    .pr-box{padding:clamp(.375rem,1.5cqi,.5rem);background:var(--composer-fill);border-color:var(--ui-stroke-secondary)}
+    .pr-composer{padding:.5rem var(--pr-composer-inset) var(--composer-shell-pad-block-end,.625rem)}
+    .pr-box{position:relative;padding:var(--composer-surface-pad-y,.3125rem) var(--composer-surface-pad-x,.5rem);border:1px solid var(--ui-stroke-secondary);border-radius:var(--radius-2xl,1rem);background:color-mix(in srgb,var(--dt-card) 88%,transparent)}
     .pr-box:has(.pr-input:focus-visible){border-color:var(--dt-composer-ring)}
     @media(forced-colors:active){.pr-box:has(.pr-input:focus-visible){outline:2px solid Highlight;outline-offset:2px}}
-    .pr-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto 28px;align-items:center;gap:clamp(2px,1cqi,5px)}
-    .pr-route-controls{min-width:0;max-width:clamp(2.75rem,30cqi - 1rem,10rem)}
-    .pr-route-pill{display:flex;align-items:center;gap:clamp(2px,.75cqi,4px);height:var(--composer-control-size,1.5rem);box-sizing:border-box;min-width:0;max-width:100%;padding:0 clamp(2px,1cqi,6px);border:0;border-radius:6px;background:transparent;font-family:inherit;font-size:clamp(min(.75rem,var(--pr-model-size)),var(--pr-model-size) + var(--pr-type-adjust),var(--pr-model-size));line-height:var(--text-sm--line-height,1.25rem);font-weight:400;color:var(--ui-text-tertiary);white-space:nowrap}
-    .pr-route-pill:hover{background:var(--chrome-action-hover)}
+    .pr-row{display:flex;align-items:center;gap:var(--composer-control-gap,.25rem)}
+    .pr-route-controls{flex:0 1 auto;min-width:calc(1.875rem + 1ch);max-width:55%}
+    .pr-route-pill{display:flex;align-items:center;gap:.25rem;height:var(--composer-control-size,1.5rem);box-sizing:border-box;min-width:0;max-width:100%;padding:0 .5rem;border:0;border-radius:var(--radius-md,.375rem);background:transparent;font-family:inherit;font-size:var(--text-xs,.75rem);line-height:var(--text-xs--line-height,1rem);font-weight:400;color:var(--ui-text-tertiary);white-space:nowrap}
+    .pr-route-pill:hover,.pr-add:is(:hover,[data-state='open']){background:var(--chrome-action-hover);color:var(--dt-foreground)}
     .pr-route-pill span{min-width:0;overflow:hidden;text-overflow:ellipsis}
-    .pr-route-pill svg{width:10px;height:10px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}
-    .pr-prose{font-family:var(--dt-font-sans);font-size:clamp(min(.75rem,var(--pr-prose-size)),var(--pr-prose-size) + var(--pr-type-adjust),var(--pr-prose-size));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
-    .pr-input{display:block;box-sizing:border-box;field-sizing:content;width:100%;min-width:0;min-height:var(--pr-input-height);max-height:160px;margin:0;padding:max(.25rem,calc((28px - 1lh) / 2)) 0;border:0;outline:none;background:transparent;resize:none;overflow-y:auto;color:var(--ui-text-primary)}
+    .pr-route-pill svg{width:.625rem;height:.625rem;flex:none;opacity:.5}
+    .pr-prose{font-family:var(--dt-font-sans);font-size:var(--pr-prose-size);line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+    .pr-turn{margin-bottom:var(--conversation-turn-gap,.375rem)}
+    .pr-turn-user{min-height:calc(2.25rem + 2px);padding:.5rem .75rem;border:1px solid var(--ui-stroke-tertiary);border-radius:var(--radius-xl,.75rem);background:var(--dt-user-bubble);color:color-mix(in srgb,var(--dt-foreground) 95%,transparent);line-height:1.3;text-align:left}
+    .pr-turn-assistant{padding-left:var(--message-text-indent,.75rem)}
+    .pr-final{--pr-final-chrome:calc(2 * .375rem + 2px);box-sizing:border-box;field-sizing:content;width:100%;min-height:calc(1lh + var(--pr-final-chrome));max-height:calc(20lh + var(--pr-final-chrome));padding:.375rem .625rem;border-width:1px;resize:none;overflow:hidden auto}
+    .pr-input{display:block;box-sizing:border-box;field-sizing:content;flex:1 1 0;min-width:2ch;min-height:max(var(--composer-input-min-height,1.625rem),var(--pr-input-height));max-height:max(var(--composer-input-max-height,9.375rem),var(--pr-input-height));margin:0;padding:.25rem .25rem .25rem 0;border:0;outline:none;background:transparent;resize:none;overflow:hidden auto;color:var(--ui-text-primary)}
     .pr-input:placeholder-shown{height:max(var(--pr-input-height),calc(1lh + .5rem));overflow:hidden}
     .pr-input::placeholder{color:var(--ui-text-tertiary);opacity:1;white-space:nowrap;text-overflow:ellipsis}
-    .pr-send{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:var(--dt-primary);color:var(--dt-primary-foreground);line-height:0}
-    .pr-send:enabled:hover{background:color-mix(in srgb,var(--dt-primary) 90%,transparent)}
-    .pr-send:disabled{background:color-mix(in srgb,var(--dt-primary) 30%,transparent);color:var(--dt-foreground)}
-    .pr-send svg{display:block;padding:0}
-    .pr-add{display:grid;place-items:center;width:24px;height:28px;padding:0;border:0;background:transparent}
+    .pr-add,.pr-send{display:grid;place-items:center;flex:none;padding:0;border:0}
+    .pr-send{width:var(--composer-control-primary-size,1.625rem);height:var(--composer-control-primary-size,1.625rem);border-radius:50%;background:var(--dt-primary);color:var(--dt-primary-foreground);opacity:1}
+    .pr-add{width:var(--composer-control-size,1.5rem);height:var(--composer-control-size,1.5rem);border-radius:var(--radius-md,.375rem);background:transparent;color:var(--ui-text-tertiary)}
     .pr-grip{position:absolute;left:50%;top:-7px;z-index:1;width:48px;height:12px;transform:translateX(-50%);padding:0;border:0;background:transparent;cursor:ns-resize;touch-action:none}
     .pr-chip{display:flex;align-items:center;gap:6px;max-width:230px;min-width:0}
     .pr-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .pr-thumb{width:32px;height:32px;object-fit:cover;flex:none}
-    @container pr-pane (inline-size <= 29rem){
-      .pr-main{padding:.625rem .75rem;overflow-wrap:anywhere}
-    }
+    .pr-main{overflow-wrap:anywhere}
     `}),
     jsx('header',{style:{display:'flex',justifyContent:'flex-end',padding:'4px 8px',borderBottom:'1px solid var(--ui-stroke-secondary)'},children:jsx(Button,{type:'button',variant:'ghost',size:'icon-xs','aria-label':'Discard refinement',title:'Discard refinement',onClick:()=>{if(sameDiscussion(controller.getState()))controller.discard()},children:jsx(sdk.Codicon,{name:'trash'})})}),
-    jsxs('main',{className:`pr-main min-h-0 flex-1 overflow-auto p-4${showEmpty ? ' grid place-items-center' : ''}`,children:[showEmpty && jsx('div',{className:'text-base text-(--ui-text-tertiary)',children:'Refine your prompt'}),...s.turns.map((turn,i)=>jsxs('div',{className:'mb-4',children:[jsx('strong',{children:turn.role === 'user' ? 'You' : 'Refiner'}),prose(s.finalDedup?.index === i && (s.candidate === s.finalDedup.text || s.proposal === s.finalDedup.text) ? turn.text.replace(s.finalDedup.text,'').trim() : turn.text)]},i)),s.reportedRoute && jsx('p',{className:'text-xs text-(--ui-text-tertiary)',children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),s.candidate && jsxs('div',{className:'mt-4 space-y-2',children:[field('Final prompt',s.candidate,v=>{if(sameDiscussion(controller.getState()))controller.editCandidate(v)}),button('Copy prompt',()=>{const current=controller.getState();if(sameDiscussion(current) && current.candidate === s.candidate)void controller.copy()})]}),s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),prose(s.proposal),button('Apply proposal',()=>{if(sameDiscussion(controller.getState()))controller.applyProposal()})]}),showRecovery && jsxs('div',{className:'space-y-2',children:[s.error && jsx('p',{role:'alert',children:s.error}),button('Refresh route',()=>{if(canEdit(controller.getState()))void controller.refreshRoute()},!!s.job)]})]}),
+    jsxs('main',{className:`pr-main min-h-0 flex-1 overflow-auto p-4${showEmpty ? ' grid place-items-center' : ''}`,children:[
+      showEmpty && jsx('div',{className:'text-base text-(--ui-text-tertiary)',children:'Refine your prompt'}),
+      ...s.turns.map((turn,i)=>{
+        const text = s.finalDedup?.index === i && (s.candidate === s.finalDedup.text || s.proposal === s.finalDedup.text) ? turn.text.replace(s.finalDedup.text,'').trim() : turn.text
+        return text ? jsx('div',{className:`pr-prose pr-turn pr-turn-${turn.role}`,role:'group','aria-label':turn.role === 'user' ? 'You' : 'Refiner','data-selectable-text':'true',children:text},i) : null
+      }),
+      s.reportedRoute && jsx('p',{className:'text-xs text-(--ui-text-tertiary)',children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),
+      s.showCandidate && jsxs('div',{className:'mt-4 space-y-2',children:[
+        jsxs('label',{className:'flex flex-col gap-1',children:['Final prompt',jsx(Textarea,{className:'pr-prose pr-final',rows:1,value:s.candidate,onChange:e=>{if(sameDiscussion(controller.getState()))controller.editCandidate(e.target.value)}})]}),
+        button('Copy prompt',()=>{const current=controller.getState();if(sameDiscussion(current) && current.candidate && current.candidate === s.candidate)void controller.copy()},!s.candidate)
+      ]}),
+      s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),prose(s.proposal),button('Apply proposal',()=>{if(sameDiscussion(controller.getState()))controller.applyProposal()})]}),
+      showRecovery && jsxs('div',{className:'space-y-2',children:[s.error && jsx('p',{role:'alert',children:s.error}),button('Refresh route',()=>{if(canEdit(controller.getState()))void controller.refreshRoute()},!!s.job)]})
+    ]}),
+
     jsx('div',{role:'status',className:'pr-status text-xs text-(--ui-text-tertiary)',children:statusMessage}),
-    jsxs('div',{className:'pr-composer',children:[s.files.some(file=>file.kind === 'image') && jsx('p',{className:'mb-2 text-xs text-(--ui-text-tertiary)',children:'Images are not redacted.'}),jsxs('div',{className:'relative rounded-md border border-(--ui-stroke-secondary) pr-box',children:[jsx('button',{type:'button',role:'separator','aria-label':'Resize message input','aria-orientation':'horizontal','aria-valuemin':28,'aria-valuemax':160,'aria-valuenow':inputHeight,className:'pr-grip',onPointerDown:e=>{if(e.button!==0)return;drag.current={pointer:e.pointerId,y:e.clientY,height:inputHeight};e.currentTarget.setPointerCapture(e.pointerId);e.preventDefault()},onPointerMove:e=>{if(drag.current?.pointer===e.pointerId)resize(drag.current.height+drag.current.y-e.clientY)},onPointerUp:()=>{drag.current=null},onPointerCancel:()=>{drag.current=null},onLostPointerCapture:()=>{drag.current=null},onKeyDown:e=>{if(!['ArrowUp','ArrowDown','Home','End'].includes(e.key))return;e.preventDefault();resize(e.key==='Home'?28:e.key==='End'?160:inputHeight+(e.key==='ArrowUp'?20:-20))},children:jsx('span',{style:{display:'block',width:'26px',height:'2px',margin:'auto',borderRadius:'2px',background:'var(--ui-stroke-secondary)'}})}),
+    jsxs('div',{className:'pr-composer',children:[s.files.some(file=>file.kind === 'image') && jsx('p',{className:'mb-2 text-xs text-(--ui-text-tertiary)',children:'Images are not redacted.'}),jsxs('div',{className:'pr-box',children:[jsx('button',{type:'button',role:'separator','aria-label':'Resize message input','aria-orientation':'horizontal','aria-valuemin':28,'aria-valuemax':160,'aria-valuenow':inputHeight,className:'pr-grip',onPointerDown:e=>{if(e.button!==0)return;drag.current={pointer:e.pointerId,y:e.clientY,height:inputHeight};e.currentTarget.setPointerCapture(e.pointerId);e.preventDefault()},onPointerMove:e=>{if(drag.current?.pointer===e.pointerId)resize(drag.current.height+drag.current.y-e.clientY)},onPointerUp:()=>{drag.current=null},onPointerCancel:()=>{drag.current=null},onLostPointerCapture:()=>{drag.current=null},onKeyDown:e=>{if(!['ArrowUp','ArrowDown','Home','End'].includes(e.key))return;e.preventDefault();resize(e.key==='Home'?28:e.key==='End'?160:inputHeight+(e.key==='ArrowUp'?20:-20))},children:jsx('span',{style:{display:'block',width:'26px',height:'2px',margin:'auto',borderRadius:'2px',background:'var(--ui-stroke-secondary)'}})}),
       (s.selection.length > 0 || s.files.length > 0) && jsxs('div',{className:'mb-2 flex flex-wrap gap-2',children:[s.selection.length > 0 && jsxs('div',{className:'rounded border border-(--ui-stroke-secondary) p-2',children:[`${s.selection.length} chat messages `,button('Remove context',()=>{if(sameDiscussion(controller.getState()))void controller.setSelection({messages:[]})})]}),...s.files.map(f=>jsxs('div',{className:'pr-chip rounded border border-(--ui-stroke-secondary) p-2',children:[f.kind === 'image' && jsx('img',{className:'pr-thumb',src:`data:${f.mime};base64,${f.data_base64}`,alt:f.name}),jsx('span',{className:'pr-chip-name',children:f.name}),button(`Remove ${f.name}`,()=>{const current=controller.getState();if(sameDiscussion(current))void controller.setSelection({files:current.files.filter(item=>item.id!==f.id)})})]},f.id))]}),
-      jsxs('div',{className:'pr-row',children:[jsx(DropdownMenu,{open:addOpen,onOpenChange:setAddOpen,children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsx('button',{type:'button','aria-label':'Add context or attachments',className:'pr-add',children:'+'})}),addOpen && jsx(DropdownMenuContent,{children:['Chat context','Files','Images'].map(label=>jsx(DropdownMenuItem,{onSelect:()=>{if(!sameDiscussion(controller.getState()))return;setAddOpen(false);setDialog(label)},children:label},label))})]})}),
+      jsxs('div',{className:'pr-row',children:[jsx(DropdownMenu,{open:addOpen,onOpenChange:setAddOpen,children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsx(Button,{type:'button',variant:'ghost',size:'icon','aria-label':'Add context or attachments',className:'pr-add',children:jsx(sdk.Codicon,{name:'add',size:'0.875rem'})})}),addOpen && jsx(DropdownMenuContent,{children:['Chat context','Files','Images'].map(label=>jsx(DropdownMenuItem,{onSelect:()=>{if(!sameDiscussion(controller.getState()))return;setAddOpen(false);setDialog(label)},children:label},label))})]})}),
       jsx('textarea',{ref:inputRef,rows:1,value:s.userInput,placeholder:'Message the refiner…','aria-label':'Message the refiner',disabled:!!s.job,className:'pr-input pr-prose',style:{'--pr-input-height':`${manualHeight}px`},onChange:e=>{if(canEdit(controller.getState()))controller.setInput({userInput:e.target.value})},onKeyDown:sendOnEnter,onCompositionStart:()=>{composing.current=refinementId},onCompositionEnd:()=>{composing.current=null},onBlur:()=>{composing.current=null}}),menu,
-      jsx('button',{type:'button','aria-label':'Send',disabled:!!s.job || !s.userInput.trim(),onClick:submit,className:'pr-send',children:jsx('svg',{viewBox:'0 0 24 24',width:16,height:16,fill:'none',stroke:'currentColor',strokeWidth:1.5,strokeLinecap:'round',strokeLinejoin:'round',children:jsx('path',{d:'M12 20V4M5 11l7-7 7 7'})})})]})]})]}),
+      jsx(Button,{type:'button','aria-label':'Send',disabled:!!s.job || !s.userInput.trim(),onClick:submit,className:'pr-send',children:jsx(sdk.Codicon,{name:'arrow-up',size:'0.875rem'})})]})]})]}),
     dialog && jsx(Dialog,{open:true,onOpenChange:open=>{if(!open)setDialog(null)},children:jsxs(DialogContent,{className:'max-h-[85vh] overflow-auto',children:[jsx(DialogTitle,{children:dialog}),dialog === 'Chat context' ? contextDialog : fileDialog,button('Done',()=>setDialog(null))]})})
   ]})
 }
