@@ -45,6 +45,8 @@ CAP = re.compile(r"^[A-Za-z0-9_-]{43}$")
 JOB = re.compile(r"^[0-9a-f]{32}$")
 EXTENSIONS = set("txt md rst csv tsv json yaml yml toml ini xml html css scss js jsx ts tsx py sh bash nix c h cpp hpp rs go java sql log".split())
 IMAGE_EXT = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+EFFORTS = frozenset("none minimal low medium high xhigh max ultra".split())
+MESSAGES["override_denied"] = "The host does not permit this model override."
 
 
 class RefinerError(Exception):
@@ -260,8 +262,21 @@ def assemble(prepared):
     return blocks
 
 
-def digest(rev, expected, prepared):
-    return hashlib.sha256(compact({"input_revision": rev, "expected_route": expected, "prepared": prepared}, sort=True).encode("utf-8")).hexdigest()
+def digest(rev, expected, prepared, execution=None):
+    payload = {"input_revision": rev, "expected_route": expected, "prepared": prepared}
+    if execution is not None:
+        payload["execution"] = execution
+    return hashlib.sha256(compact(payload, sort=True).encode("utf-8")).hexdigest()
+
+
+def validate_execution(value):
+    closed(value, ("model_override", "reasoning_effort"))
+    if value["model_override"] is not None:
+        route(value["model_override"])
+        if any(part != part.strip() for part in value["model_override"].values()):
+            fail("invalid_params")
+    if value["reasoning_effort"] is not None:
+        fail("invalid_params")
 
 
 def identity(value):
@@ -321,7 +336,7 @@ def handler(method):
                 fail("invalid_params")
             if size > LIMITS["max_rpc_bytes"]:
                 fail("too_large")
-            if not isinstance(params, dict) or type(params.get("protocol_version")) is not int or params["protocol_version"] != 1:
+            if not isinstance(params, dict) or type(params.get("protocol_version")) is not int or params["protocol_version"] not in (1, 2):
                 fail("invalid_params")
             return {"ok": True, "data": method(self, params)}
         except RefinerError as exc:
@@ -332,7 +347,7 @@ def handler(method):
 
 
 class RefinerService:
-    def __init__(self, *, model_complete, read_route, read_image_attestation, redact_text, monotonic, random_bytes, launch_worker):
+    def __init__(self, *, model_complete, read_route, read_image_attestation, redact_text, monotonic, random_bytes, launch_worker, read_execution_policy=None):
         self.model_complete = model_complete
         self.read_route = read_route
         self.read_image_attestation = read_image_attestation
@@ -340,6 +355,7 @@ class RefinerService:
         self.monotonic = monotonic
         self.random_bytes = random_bytes
         self.launch_worker = launch_worker
+        self.read_execution_policy = read_execution_policy or (lambda: {})
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.jobs = {}
@@ -382,45 +398,85 @@ class RefinerService:
         setting = self.read_image_attestation()
         return isinstance(setting, dict) and set(setting) == {"provider", "model", "confirmed", "compatibility_baseline"} and setting["confirmed"] is True and setting["compatibility_baseline"] == BASELINE and configured is not None and setting["provider"] == configured["provider"] and setting["model"] == configured["model"]
 
-    def check_route(self, expected, images):
+    def policy(self):
+        try:
+            value = self.read_execution_policy()
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def check_route(self, expected, images, execution=None):
         route(expected)
-        current = self.configured()
-        if current is None:
-            fail("route_unconfigured")
-        if expected != current:
-            fail("route_changed")
-        if images and not self.confirmed(current):
+        if execution is not None:
+            validate_execution(execution)
+        override = execution["model_override"] if execution is not None else None
+        if override is None:
+            current = self.configured()
+            if current is None:
+                fail("route_unconfigured")
+            if expected != current:
+                fail("route_changed")
+        else:
+            policy = self.policy()
+            for kind in ("provider", "model"):
+                if policy.get("allow_" + kind + "_override") is not True:
+                    fail("override_denied")
+                allowed = policy.get("allowed_" + kind + "s")
+                if isinstance(allowed, list):
+                    names = {item.strip().lower() for item in allowed if isinstance(item, str) and item.strip()}
+                    if "*" not in names and override[kind].strip().lower() not in names:
+                        fail("override_denied")
+            if expected != override:
+                fail("route_changed")
+        if images and not self.confirmed(expected):
             fail("image_not_confirmed")
 
     @handler
     def describe(self, params):
         closed(params, ("protocol_version",))
         current = self.configured()
-        return {"configured_route": current, "image_eligibility": "operator_confirmed" if self.confirmed(current) else "not_confirmed", "host_fallback_unresolved": True, "model_timeout_seconds": 90, "compatibility_baseline": BASELINE, "limits": dict(LIMITS)}
+        result = {"configured_route": current, "image_eligibility": "operator_confirmed" if self.confirmed(current) else "not_confirmed", "host_fallback_unresolved": True, "model_timeout_seconds": 90, "compatibility_baseline": BASELINE, "limits": dict(LIMITS)}
+        if params["protocol_version"] == 2:
+            config = self.read_route()
+            effort = config.get("reasoning_effort") if isinstance(config, dict) else None
+            policy = self.policy()
+            result.update(configured_reasoning_effort=effort if isinstance(effort, str) and effort in EFFORTS else None, execution_support={"model_override": policy.get("allow_provider_override") is True and policy.get("allow_model_override") is True, "reasoning_effort": False})
+        return result
 
     @handler
     def prepare(self, params):
-        closed(params, ("protocol_version", "input_revision", "expected_route", "input"))
+        v2 = params["protocol_version"] == 2
+        closed(params, ("protocol_version", "input_revision", "expected_route", "input", "execution") if v2 else ("protocol_version", "input_revision", "expected_route", "input"))
+        execution = params["execution"] if v2 else None
+        if v2:
+            validate_execution(execution)
         revision(params["input_revision"])
         images = validate_input(params["input"], False)
-        self.check_route(params["expected_route"], images)
+        self.check_route(params["expected_route"], images, execution)
         prepared = sanitized_input(params["input"], self.redact_text, True)
         validate_input(prepared, True)
         assemble(prepared)
         raw = params["input"]
         unredacted = sanitized_input(raw, lambda x: x, True)
-        return {"input_revision": params["input_revision"], "expected_route": params["expected_route"], "prepared": prepared, "preview_digest": digest(params["input_revision"], params["expected_route"], prepared), "redacted": prepared != unredacted}
+        result = {"input_revision": params["input_revision"], "expected_route": params["expected_route"], "prepared": prepared, "preview_digest": digest(params["input_revision"], params["expected_route"], prepared, execution), "redacted": prepared != unredacted}
+        if v2:
+            result["execution"] = copy.deepcopy(execution)
+        return result
 
     @handler
     def start(self, params):
-        closed(params, ("protocol_version", "identity", "expected_route", "prepared", "preview_digest"))
+        v2 = params["protocol_version"] == 2
+        closed(params, ("protocol_version", "identity", "expected_route", "prepared", "preview_digest", "execution") if v2 else ("protocol_version", "identity", "expected_route", "prepared", "preview_digest"))
+        execution = params["execution"] if v2 else None
+        if v2:
+            validate_execution(execution)
         identity(params["identity"])
         images = validate_input(params["prepared"], True)
-        self.check_route(params["expected_route"], images)
+        self.check_route(params["expected_route"], images, execution)
         supplied = params["preview_digest"]
         if not isinstance(supplied, str) or not HEX.fullmatch(supplied):
             fail("invalid_params")
-        if not hmac.compare_digest(supplied, digest(params["identity"]["input_revision"], params["expected_route"], params["prepared"])):
+        if not hmac.compare_digest(supplied, digest(params["identity"]["input_revision"], params["expected_route"], params["prepared"], execution)):
             fail("preview_required")
         try:
             sanitized = sanitized_input(params["prepared"], self.redact_text, False)
@@ -451,6 +507,7 @@ class RefinerService:
                 "digest": supplied,
                 "handle": {"job_id": job_id, "result_capability": capability},
                 "route": dict(params["expected_route"]),
+                "execution": copy.deepcopy(execution),
                 "state": "pending",
                 "active": True,
                 "started": self.monotonic(),
@@ -476,7 +533,12 @@ class RefinerService:
                 return
         result, error = None, None
         try:
-            self.check_route(job["route"], images)
+            execution = job["execution"]
+            self.check_route(job["route"], images, execution)
+            options = {}
+            if execution is not None:
+                if execution["model_override"] is not None:
+                    options.update(execution["model_override"])
             reply = self.model_complete(
                 instructions=REQUEST_INSTRUCTION,
                 input=blocks,
@@ -489,6 +551,7 @@ class RefinerService:
                 max_tokens=4096,
                 timeout=90,
                 purpose="prompt-refinement",
+                **options,
             )
             result = self.parse_result(reply)
         except RefinerError as exc:
