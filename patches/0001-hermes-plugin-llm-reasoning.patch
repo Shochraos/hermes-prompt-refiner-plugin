@@ -1,0 +1,134 @@
+diff --git a/agent/plugin_llm.py b/agent/plugin_llm.py
+index 6f9e7ec16be8e31016a6cbb8860837c6b63c7302..55f37b617bfeb23e0128fe0a76f7999387daddf5 100644
+--- a/agent/plugin_llm.py
++++ b/agent/plugin_llm.py
+@@ -3,7 +3,7 @@
+ ``complete`` / ``complete_structured`` (text + image inputs, JSON schema validation)
+ and their async siblings. Provider/model/agent_id/profile are explicit keyword
+ arguments mirroring the host config shape; the host owns routing, auth, timeouts
+-and fallback, so the plugin never sees raw tokens or keys. Every override knob is
++and fallback, so the plugin never sees raw tokens or keys. Routing overrides are
+ gated by the per-plugin ``plugins.entries.<id>.llm.allow_*_override`` trust flags
+ (fail-closed: a missing block means "no overrides"). Backed by
+ :func:`agent.auxiliary_client.call_llm`.
+@@ -18,6 +18,8 @@ import re
+ from dataclasses import dataclass, field
+ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
+ 
++from agent.reasoning_effort import EFFORT_LADDER
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -487,14 +489,17 @@ class PluginLlm:
+         self, messages: list[dict[str, Any]], *, provider: Optional[str] = None, model: Optional[str] = None,
+         temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+         timeout: Optional[float] = None, agent_id: Optional[str] = None, profile: Optional[str] = None,
+-        purpose: Optional[str] = None, task: Optional[str] = None,
++        purpose: Optional[str] = None, task: Optional[str] = None, reasoning_effort: Optional[str] = None,
+     ) -> PluginLlmCompleteResult:
+         """Run a host-owned chat completion against the user's active model.
+ 
+         ``provider``/``model``/``agent_id``/``profile`` are each gated by
+         ``plugins.entries.<id>.llm.allow_*_override``. ``task`` routes through a
+-        plugin-registered auxiliary slot (see :func:`_check_task`)."""
+-        agent, kw = self._gate(provider, model, agent_id, profile, task, messages, temperature, max_tokens, timeout)
++        plugin-registered auxiliary slot (see :func:`_check_task`). An explicit
++        ``reasoning_effort`` requests a canonical effort for this call only;
++        ``None`` leaves host defaults unchanged."""
++        agent, kw = self._gate(provider, model, agent_id, profile, task, messages, temperature, max_tokens, timeout,
++                               reasoning_effort=reasoning_effort)
+         return self._finish("complete", agent, kw, self._invoke_sync(kw), purpose)
+ 
+     def complete_structured(
+@@ -503,6 +508,7 @@ class PluginLlm:
+         provider: Optional[str] = None, model: Optional[str] = None, temperature: Optional[float] = None,
+         max_tokens: Optional[int] = None, timeout: Optional[float] = None, agent_id: Optional[str] = None,
+         profile: Optional[str] = None, purpose: Optional[str] = None, task: Optional[str] = None,
++        reasoning_effort: Optional[str] = None,
+     ) -> PluginLlmStructuredResult:
+         """Run a bounded host-owned structured completion.
+ 
+@@ -510,17 +516,19 @@ class PluginLlm:
+         ``json_schema`` the response is parsed (and validated when the optional
+         ``jsonschema`` package is installed) into ``result.parsed``."""
+         spec = _structured_spec("complete_structured", instructions, input, system_prompt, json_mode, json_schema, schema_name)
+-        agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec)
++        agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec,
++                               reasoning_effort=reasoning_effort)
+         return self._finish("complete_structured", agent, kw, self._invoke_sync(kw), purpose, spec)
+ 
+     async def acomplete(
+         self, messages: list[dict[str, Any]], *, provider: Optional[str] = None, model: Optional[str] = None,
+         temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+         timeout: Optional[float] = None, agent_id: Optional[str] = None, profile: Optional[str] = None,
+-        purpose: Optional[str] = None, task: Optional[str] = None,
++        purpose: Optional[str] = None, task: Optional[str] = None, reasoning_effort: Optional[str] = None,
+     ) -> PluginLlmCompleteResult:
+         """Async sibling of :meth:`complete`."""
+-        agent, kw = self._gate(provider, model, agent_id, profile, task, messages, temperature, max_tokens, timeout)
++        agent, kw = self._gate(provider, model, agent_id, profile, task, messages, temperature, max_tokens, timeout,
++                               reasoning_effort=reasoning_effort)
+         return self._finish("acomplete", agent, kw, await self._invoke_async(kw), purpose)
+ 
+     async def acomplete_structured(
+@@ -529,16 +537,19 @@ class PluginLlm:
+         provider: Optional[str] = None, model: Optional[str] = None, temperature: Optional[float] = None,
+         max_tokens: Optional[int] = None, timeout: Optional[float] = None, agent_id: Optional[str] = None,
+         profile: Optional[str] = None, purpose: Optional[str] = None, task: Optional[str] = None,
++        reasoning_effort: Optional[str] = None,
+     ) -> PluginLlmStructuredResult:
+         """Async sibling of :meth:`complete_structured`."""
+         spec = _structured_spec("acomplete_structured", instructions, input, system_prompt, json_mode, json_schema, schema_name)
+-        agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec)
++        agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec,
++                               reasoning_effort=reasoning_effort)
+         return self._finish("acomplete_structured", agent, kw, await self._invoke_async(kw), purpose, spec)
+ 
+     def _gate(
+         self, provider: Optional[str], model: Optional[str], agent_id: Optional[str], profile: Optional[str],
+         task: Optional[str], messages: Optional[list[dict[str, Any]]], temperature: Optional[float],
+         max_tokens: Optional[int], timeout: Optional[float], spec: Optional[dict[str, Any]] = None,
++        *, reasoning_effort: Optional[str] = None,
+     ) -> tuple[Optional[str], dict[str, Any]]:
+         """Trust gate (task first, then overrides), then — for a structured ``spec`` —
+         build messages/response_format (input-shape errors surface only after trust
+@@ -550,13 +561,19 @@ class PluginLlm:
+         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
+             policy, requested_provider=provider, requested_model=model, requested_agent_id=agent_id,
+             requested_profile=profile)
++        if reasoning_effort is not None and (not isinstance(reasoning_effort, str) or reasoning_effort not in EFFORT_LADDER):
++            raise ValueError(f"Invalid reasoning_effort: {reasoning_effort!r}")
+         extra_body = None
+         if spec is not None:
+             messages = _build_structured_messages(**spec)
+             extra_body = _json_response_format(json_mode=spec["json_mode"], json_schema=spec["json_schema"])
+-        return eff_agent, dict(messages=messages, provider_override=eff_provider, model_override=eff_model,
+-                               profile_override=eff_profile, temperature=temperature, max_tokens=max_tokens,
+-                               timeout=timeout, extra_body=extra_body, task=eff_task)
++        kw = dict(messages=messages, provider_override=eff_provider, model_override=eff_model,
++                  profile_override=eff_profile, temperature=temperature, max_tokens=max_tokens,
++                  timeout=timeout, extra_body=extra_body, task=eff_task)
++        if reasoning_effort is not None:
++            kw["reasoning_config"] = ({"enabled": False} if reasoning_effort == "none"
++                                      else {"enabled": True, "effort": reasoning_effort})
++        return eff_agent, kw
+ 
+     def _finish(
+         self, name: str, agent_id: Optional[str], kw: dict[str, Any], invoked: tuple[str, str, Any],
+@@ -592,9 +609,12 @@ class PluginLlm:
+         if kw["profile_override"]:
+             merged_extra.setdefault("metadata", {})["auth_profile"] = kw["profile_override"]
+         route_info: Optional[dict[str, str]] = {} if kw["task"] else None
+-        return dict(task=kw["task"], provider=kw["provider_override"], model=kw["model_override"],
+-                    messages=kw["messages"], temperature=kw["temperature"], max_tokens=kw["max_tokens"],
+-                    timeout=kw["timeout"], extra_body=merged_extra or None, route_info=route_info), route_info
++        host_kw = dict(task=kw["task"], provider=kw["provider_override"], model=kw["model_override"],
++                       messages=kw["messages"], temperature=kw["temperature"], max_tokens=kw["max_tokens"],
++                       timeout=kw["timeout"], extra_body=merged_extra or None, route_info=route_info)
++        if "reasoning_config" in kw:
++            host_kw["reasoning_config"] = kw["reasoning_config"]
++        return host_kw, route_info
+ 
+     @staticmethod
+     def _attributed(kw: dict[str, Any], response: Any, route_info: Optional[dict[str, str]]) -> tuple[str, str, Any]:
