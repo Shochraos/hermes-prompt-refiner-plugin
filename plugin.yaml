@@ -1,6 +1,6 @@
 name: prompt-refiner
 version: 0.1.0
-description: Gateway counterpart for Prompt Refiner (Desktop)
+description: Sends the text and files you choose to the refiner model and returns its suggestions to Desktop.
 author: Shochraos
 license: Unlicense
 python_dependencies:
