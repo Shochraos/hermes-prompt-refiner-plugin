@@ -1,0 +1,15 @@
+/result
+/result-*
+/.direnv/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.envrc
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+/verification/
