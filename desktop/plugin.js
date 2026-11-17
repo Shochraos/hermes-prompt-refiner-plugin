@@ -1,5 +1,5 @@
-import { atom, useValue, useQuery, queryClient, host, gatewayActivationEpoch, COMPOSER_AREAS, Button, Textarea, Checkbox } from '@hermes/plugin-sdk'
-import { useEffect, useState } from 'react'
+import { atom, useValue, useQuery, queryClient, host, gatewayActivationEpoch, COMPOSER_AREAS, Button, Textarea, Checkbox, DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, Dialog, DialogContent, DialogTitle, ModelCatalogMenu, ModelMenuCloseContext, reasoningEffortLabel, REASONING_EFFORTS, REASONING_EFFORT_VALUES, catalogProviderMatches } from '@hermes/plugin-sdk'
+import { useEffect, useState, useRef } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const prefix = 'plugin.prompt-refiner.'
@@ -111,6 +111,7 @@ export function createController(dependencies) {
     return invalidate(patch)
   }
   function setExecution(values) {
+    if (state.job) return state
     if (!state.origin || !values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some(key=>!['model_override','reasoning_effort'].includes(key))) return emit({error:errors.invalid_params})
     const execution = {...state.execution, ...values}
     if (!executionValid(execution)) return emit({error:errors.invalid_params})
@@ -285,6 +286,20 @@ function Panel({controller, store, ctx}) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState([])
   const [fileError, setFileError] = useState(null)
+  const [dialog, setDialog] = useState(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [modelOpen, setModelOpen] = useState(false)
+  const [effortOpen, setEffortOpen] = useState(false)
+  const [inputHeight, setInputHeight] = useState(28)
+  const inputRef = useRef(null)
+  const drag = useRef(null)
+  const manualHeight = useRef(28)
+  const owner = s.origin?.route, refinementId = s.refinementId
+  const catalog = useQuery({
+    queryKey:['prompt-refiner','model-options',owner?.connectionId || null,owner?.profile || null,owner?.targetProfile || null,refinementId],
+    queryFn:()=>routed(owner,'model.options',{explicit_only:true,profile:owner.targetProfile}),
+    enabled:!!owner && !!refinementId, retry:false
+  })
   const job = s.job?.handle ? s.job : null
   const status = useQuery({
     queryKey:job ? job.queryKey : ['prompt-refiner','idle'],
@@ -292,10 +307,17 @@ function Panel({controller, store, ctx}) {
     enabled:!!job, refetchInterval:3000, retry:false
   })
   useEffect(() => { if (job && status.data) controller.acceptStatus(status.data, job.identity) }, [status.data, job?.identity.request_id])
-  useEffect(() => { setHistory([]); setCursor(null); setHistoryError(null); setFolder(null); setPath(''); setEntries([]) }, [s.refinementId])
+  useEffect(() => { setHistory([]); setCursor(null); setHistoryError(null); setFolder(null); setPath(''); setEntries([]); setDialog(null); setAddOpen(false); setModelOpen(false); setEffortOpen(false); manualHeight.current=28; setInputHeight(28) }, [s.refinementId])
+  useEffect(() => { manualHeight.current=28; setInputHeight(28) }, [s.turns.length])
+  useEffect(() => {
+    const el=inputRef.current
+    if (!el) return
+    el.style.height='28px'
+    setInputHeight(Math.max(manualHeight.current,Math.min(160,el.scrollHeight)))
+  }, [s.userInput,s.refinementId,s.turns.length])
   async function loadHistory(earlier) {
     const current = controller.getState(), id = current.refinementId
-    if (!current.origin?.storedId) return
+    if (current.refinementId !== refinementId || !current.origin?.storedId) return
     try {
       const params = {session_id:current.origin.storedId, limit:100, order:'latest', inline_images:false}
       if (earlier && cursor) params.cursor = cursor
@@ -312,13 +334,15 @@ function Panel({controller, store, ctx}) {
     } catch { if (controller.getState().refinementId === id) setHistoryError('History unavailable. Refresh history or reopen from the intended chat.') }
   }
   function selectHistory(row, checked) {
-    const selected = new Set(s.selection.map(x => x.id))
+    if (controller.getState().refinementId !== refinementId) return
+    const selected = new Set(controller.getState().selection.map(x => x.id))
     if (checked) selected.add(row.localId); else selected.delete(row.localId)
     const messages = history.filter(r => selected.has(r.localId) && r.row_kind === 'message' && ['user','assistant'].includes(r.role) && typeof r.text === 'string').map((r,sequence) => ({id:r.localId, role:r.role, sequence, truncated:r.truncated === true, text:r.text}))
     void controller.setSelection({messages})
   }
   async function openFolder() {
     const id = controller.getState().refinementId
+    if (id !== refinementId) return
     try {
       if (!ctx.files?.requestFolder) throw new Error('unavailable')
       const result = await ctx.files.requestFolder()
@@ -328,6 +352,7 @@ function Panel({controller, store, ctx}) {
     } catch { if (controller.getState().refinementId === id) setFileError('Folder access unavailable. Reselect files.') }
   }
   async function listFolder(f,p,id) {
+    if (id !== refinementId || controller.getState().refinementId !== id) return
     try {
       const result = await ctx.files.list(f.id,p)
       if (controller.getState().refinementId !== id) return
@@ -337,6 +362,7 @@ function Panel({controller, store, ctx}) {
   }
   async function addFile(entry) {
     const now = controller.getState(), id = now.refinementId, revision = now.revision
+    if (id !== refinementId || !folder) return
     try {
       const f = await readFile(ctx,{folder:folder.id,path:entry.path,name:entry.name})
       if (controller.getState().refinementId !== id || controller.getState().revision !== revision) return
@@ -347,27 +373,38 @@ function Panel({controller, store, ctx}) {
   const field = (label, value, onChange, disabled = false) => jsxs('label',{className:'flex flex-col gap-1',children:[label,jsx(Textarea,{value,onChange:e => onChange(e.target.value),disabled})]})
   const textFilePreview = f => { try { return new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(f.data_base64), x => x.charCodeAt(0))) } catch { return '' } }
   const showFile = f => jsxs('div',{className:'flex flex-col gap-1',children:[jsx('div',{children:`${f.name} · ${f.kind} · ${f.kind === 'image' ? f.mime : 'text/plain'} · ${f.data_base64 ? atob(f.data_base64).length : byteLength(f.text)} bytes`}),f.kind === 'image' ? jsx('img',{src:`data:${f.mime};base64,${f.data_base64}`,alt:f.name,className:'max-h-48 max-w-full object-contain'}) : jsx('pre',{className:'whitespace-pre-wrap break-words',children:f.text ?? textFilePreview(f)})]},f.id)
-  if (!s.origin) return jsxs('div',{className:'flex flex-col gap-2 p-3 text-sm',children:['Prompt refiner is idle.',s.error && jsx('p',{role:'alert',children:s.error})]})
-  return jsxs('div',{className:'flex h-full flex-col gap-3 overflow-auto p-3 text-sm',children:[
-    jsx('h2',{children:'Origin and configured refiner'}),
-    jsx('p',{children:`${s.origin.route.connectionId} / ${s.origin.route.profile} → ${s.origin.route.targetProfile} · ${s.origin.storedId || 'fresh chat'}`}),
-    jsx('p',{children:`Configured refiner: ${s.routeInfo?.configured_route ? `${s.routeInfo.configured_route.provider} / ${s.routeInfo.configured_route.model}` : 'not configured'}`}),
-    jsx('p',{children:`Operator-confirmed image compatibility: ${s.routeInfo?.image_eligibility === 'operator_confirmed' ? 'yes' : 'no'}`}),
-    jsx('p',{children:warning}), button('Open auxiliary settings',()=>{ if (typeof host.navigate === 'function') host.navigate('/settings?tab=config:model&page=auxiliary'); else host.notify({kind:'error',message:'Required Hermes settings API is unavailable.'}) }), jsx('p',{children:`Select the captured connection and profile ${s.origin.route.profile} in Settings before changing the refiner route.`}), button('Refresh route',()=>void controller.refreshRoute()),
-    jsx('h2',{children:'Draft and selected source previews'}),
-    field(s.origin.storedId ? 'Stored draft text snapshot (inspect before upload; not an atomic owner attestation)' : 'Fresh chat: type or paste the prompt to refine',s.draft,v=>controller.setInput({draft:v})),
-    s.origin.storedId && jsxs('div',{children:[button('Refresh history',()=>void loadHistory(false)),cursor && button('Load earlier',()=>void loadHistory(true)),jsx('p',{children:'Stored display projection may be incomplete or truncated. Compaction and tool rows cannot be selected. Attachments are not fetched.'}),historyError && jsx('p',{role:'alert',children:historyError}),...history.map(row => jsxs('div',{className:'my-2',children:[row.row_kind === 'message' && ['user','assistant'].includes(row.role) && typeof row.text === 'string' ? jsx(Checkbox,{checked:s.selection.some(m=>m.id===row.localId),onCheckedChange:value=>selectHistory(row,value === true),'aria-label':`Select ${row.role} message`}) : null,jsx('span',{children:` ${row.role || row.row_kind}${row.truncated ? ' (truncated)' : ''}`}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:typeof row.text === 'string' ? row.text : '[non-selectable entry]'})]},row.localId))]}),
-    jsx('p',{children:'Folder access persists until revoked in Capabilities → Plugins → Folder access.'}),button('Choose folder',()=>void openFolder()),fileError && jsx('p',{role:'alert',children:fileError}),
-    folder && jsxs('div',{children:[jsx('p',{children:`${folder.name}${path ? ` / ${path}` : ''}`}),path && button('Up',()=>void listFolder(folder,path.split('/').slice(0,-1).join('/'),s.refinementId)),...entries.map(entry => button(entry.isDirectory ? `${entry.name}/` : `Add ${entry.name}`,()=>entry.isDirectory ? void listFolder(folder,entry.path,s.refinementId) : void addFile(entry)))]}),
-    ...s.files.map(f=>jsxs('div',{children:[showFile(f),button('Remove file',()=>void controller.setSelection({files:s.files.filter(item=>item.id!==f.id)}))]},f.id)),
-    jsx('h2',{children:'Refinement discussion'}),...s.turns.map((turn,i)=>jsxs('div',{children:[jsx('strong',{children:turn.role}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:turn.text})]},i)),
-    field('Current refinement input',s.userInput,v=>controller.setInput({userInput:v}),!!s.job),
-    jsx('p',{children:`Prepare preview uploads selected inputs to ${s.origin.route.connectionId} / ${s.origin.route.profile} for validation and redaction; no model call yet.`}),button('Prepare preview',()=>void controller.prepare(),!!s.job),
-    s.prepared && jsxs('div',{children:[jsx('h2',{children:'Prepared request preview'}),jsx('p',{children:s.prepared.redacted ? 'Text was redacted.' : 'No text redaction reported.'}),jsx('p',{children:warning}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:JSON.stringify({...s.prepared.prepared,files:s.prepared.prepared.files.map(f=>({id:f.id,kind:f.kind,name:f.name,...(f.mime ? {mime:f.mime} : {})}))},null,2)}),...s.prepared.prepared.files.map(showFile),jsx('p',{children:'Send this inspected preview through Hermes model routing; model use may incur costs.'}),button('Send to refiner',()=>void controller.send(),!!s.job)]}),
-    status.isError && jsx('p',{role:'alert',children:'Status unavailable. The request may still be running.'}),s.reportedRoute && jsx('p',{children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),
-    jsx('h2',{children:'Editable candidate'}),field('Candidate prompt',s.candidate,v=>controller.editCandidate(v)),s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:s.proposal}),button('Apply proposal',()=>controller.applyProposal())]}),button('Copy prompt',()=>void controller.copy(),!s.candidate),
-    s.message && jsx('p',{children:s.message}),s.error && jsx('p',{role:'alert',children:s.error}),
-    jsx('p',{children:'Discard suppresses late output; it does not guarantee provider cancellation or erase copied text, logs or host folder grants.'}),button('Discard refinement',()=>controller.discard())
+  if (!s.origin) return jsxs('div',{className:'flex h-full min-h-0 flex-col text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:[jsx('header',{className:'border-b border-(--ui-stroke-secondary) px-4 py-3',children:'Prompt refiner'}),jsxs('main',{className:'grid min-h-0 flex-1 place-items-center p-4 text-(--ui-text-tertiary)',children:[jsx('div',{className:'text-base',children:'Refine your prompt'}),s.error && jsx('p',{role:'alert',children:s.error})]})]})
+  const route = s.execution.model_override || s.routeInfo?.configured_route
+  const support = s.routeInfo?.execution_support
+  const sameDiscussion = current => current.refinementId === refinementId && !!current.origin && sameRoute(current.origin.route,owner)
+  const canEdit = current => sameDiscussion(current) && !current.job
+  const capabilityRows = Array.isArray(catalog.data?.providers) ? catalog.data.providers.filter(row=>catalogProviderMatches(row,route?.provider || '')) : []
+  const caps = capabilityRows.length === 1 ? capabilityRows[0].capabilities?.[route?.model] : null
+  const reasoningEnabled = !!support?.reasoning_effort && caps?.reasoning === true && !s.job
+  const menuController = {
+    allowSpeed:false,
+    current:{model:route?.model || '',provider:route?.provider || '',effort:s.execution.reasoning_effort || '',fast:false},
+    presetFor:()=>({}),
+    select:(model,provider)=>{ const current=controller.getState(); if (canEdit(current) && current.routeInfo?.execution_support.model_override) controller.setExecution({model_override:{model,provider}}) },
+    applyPreset:(preset,row)=>{ const current=controller.getState(); if (canEdit(current) && current.routeInfo?.execution_support.model_override) controller.setExecution({model_override:{model:row.model,provider:row.provider},...(current.routeInfo.execution_support.reasoning_effort && preset.effort !== undefined ? {reasoning_effort:preset.effort || null} : {})}) },
+    setOptions:(patch,row)=>{ const current=controller.getState(), selected=current.execution.model_override || current.routeInfo?.configured_route; if (canEdit(current) && current.routeInfo?.execution_support.reasoning_effort && patch.effort !== undefined && (sameLabels(selected,row) || current.routeInfo.execution_support.model_override)) controller.setExecution({...(sameLabels(selected,row) ? {} : {model_override:{model:row.model,provider:row.provider}}),reasoning_effort:patch.effort || null}) }
+  }
+  const resize = value => { const height = Math.max(28,Math.min(160,value)); manualHeight.current = height; setInputHeight(height) }
+  const chevron = jsx('svg',{viewBox:'0 0 12 12','aria-hidden':true,children:jsx('path',{d:'m3 4.5 3 3 3-3'})})
+  const menu = jsxs('div',{className:'pr-route-controls',children:[
+    jsx(DropdownMenu,{open:modelOpen,onOpenChange:open=>{if (!open || canEdit(controller.getState())) setModelOpen(open)},children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsxs('button',{type:'button',className:'pr-route-pill',disabled:(!support?.model_override && !s.execution.model_override) || !!s.job,'aria-label':'Refiner model for this conversation',title:'Only this conversation',children:[jsx('span',{children:route?.model || 'Model unavailable'}),chevron]})}),modelOpen && jsx(DropdownMenuContent,{align:'end',className:'w-72 p-0',children:jsxs(ModelMenuCloseContext.Provider,{value:()=>setModelOpen(false),children:[jsx(DropdownMenuItem,{onSelect:()=>{const current=controller.getState();if(canEdit(current)) controller.setExecution({model_override:null,reasoning_effort:current.routeInfo?.execution_support.reasoning_effort ? current.routeInfo.configured_reasoning_effort : null})},children:'Use configured refiner'}),jsx(ModelCatalogMenu,{controller:menuController,request:async(method,params)=>{if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');const result=await routed(owner,method,params);if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');return result},ownerConnectionId:owner.connectionId,profile:owner.targetProfile})]})})]})}),
+    jsx(DropdownMenu,{open:effortOpen,onOpenChange:open=>{if (!open || (canEdit(controller.getState()) && reasoningEnabled)) setEffortOpen(open)},children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsxs('button',{type:'button',className:'pr-route-pill',disabled:!reasoningEnabled,'aria-label':'Reasoning effort for this conversation',title:catalog.isLoading ? 'Loading reasoning availability' : caps?.reasoning === true ? 'Only this conversation' : 'Reasoning availability unknown or unsupported',children:[jsx('span',{children:s.execution.reasoning_effort ? reasoningEffortLabel(s.execution.reasoning_effort) : 'Default'}),chevron]})}),effortOpen && jsx(DropdownMenuContent,{align:'end',children:(caps?.can_disable_reasoning === true ? REASONING_EFFORT_VALUES : REASONING_EFFORTS).map(value=>jsx(DropdownMenuItem,{role:'menuitemradio','aria-checked':s.execution.reasoning_effort === value,onSelect:()=>{const current=controller.getState();const currentRoute=current.execution.model_override || current.routeInfo?.configured_route;if(canEdit(current) && current.routeInfo?.execution_support.reasoning_effort && sameLabels(currentRoute,route) && caps?.reasoning === true && (value !== 'none' || caps.can_disable_reasoning === true)) controller.setExecution({reasoning_effort:value})},children:reasoningEffortLabel(value)},value))})]})})
+  ]})
+  const contextDialog = jsxs('div',{className:'space-y-2',children:[jsx('p',{children:'Stored display projection may be incomplete or truncated. Compaction and tool rows cannot be selected. Attachments are not fetched.'}),s.origin.storedId ? button('Refresh history',()=>void loadHistory(false)) : jsx('p',{children:'No stored chat is available.'}),cursor && button('Load earlier',()=>void loadHistory(true)),historyError && jsx('p',{role:'alert',children:historyError}),...history.map(row=>jsxs('div',{className:'my-2',children:[row.row_kind === 'message' && ['user','assistant'].includes(row.role) && typeof row.text === 'string' ? jsx(Checkbox,{checked:s.selection.some(m=>m.id===row.localId),onCheckedChange:value=>selectHistory(row,value === true),'aria-label':`Select ${row.role} message`}) : null,jsx('span',{children:` ${row.role || row.row_kind}${row.truncated ? ' (truncated)' : ''}`}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:typeof row.text === 'string' ? row.text : '[non-selectable entry]'})]},row.localId))]})
+  const fileDialog = jsxs('div',{className:'space-y-2',children:[jsx('p',{children:'Folder access persists until revoked in Capabilities → Plugins → Folder access. Only selected files are read. PDF and Office files are not supported.'}),button('Choose folder',()=>void openFolder()),fileError && jsx('p',{role:'alert',children:fileError}),folder && jsxs('div',{children:[jsx('p',{children:`${folder.name}${path ? ` / ${path}` : ''}`}),path && button('Up',()=>void listFolder(folder,path.split('/').slice(0,-1).join('/'),s.refinementId)),...entries.filter(entry=>entry.isDirectory || (dialog === 'Images' ? !!imageExtensions[entry.name.split('.').pop().toLowerCase()] : !imageExtensions[entry.name.split('.').pop().toLowerCase()])).map(entry=>button(entry.isDirectory ? `${entry.name}/` : `Add ${entry.name}`,()=>entry.isDirectory ? void listFolder(folder,entry.path,s.refinementId) : void addFile(entry)))]})]})
+  const review = jsxs('div',{className:'space-y-3',children:[jsx('p',{children:`Captured owner: ${s.origin.route.connectionId} / ${s.origin.route.profile} → ${s.origin.route.targetProfile} · ${s.origin.storedId || 'fresh chat'}`}),jsx('p',{children:'The captured draft is a snapshot, not an atomic owner attestation.'}),jsx('p',{children:`Requested route: ${route ? `${route.provider} / ${route.model}` : 'not configured'}; reasoning: ${s.execution.reasoning_effort || s.routeInfo?.configured_reasoning_effort || 'unknown'}.`}),jsx('p',{children:warning}),jsx('p',{children:'Prepare preview uploads the selected content to the captured owner for validation and redaction only. Sending to the refiner requires another explicit action and may incur costs. Model overrides require host permission.'}),jsx('h3',{children:'Local request'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:JSON.stringify({turns:s.turns,user_input:s.userInput,candidate_prompt:s.candidate || null},null,2)}),...s.selection.map(m=>jsx('pre',{className:'whitespace-pre-wrap break-words',children:`${m.role}${m.truncated ? ' (truncated)' : ''}: ${m.text}`},m.id)),...s.files.map(showFile),button('Refresh route',()=>{if(sameDiscussion(controller.getState()))void controller.refreshRoute()}),button('Prepare preview',()=>{if(canEdit(controller.getState()))void controller.prepare()},!!s.job),s.prepared && jsxs('div',{className:'space-y-2',children:[jsx('h3',{children:'Prepared redacted preview'}),jsx('p',{children:s.prepared.redacted ? 'Text was redacted.' : 'No text redaction reported.'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:JSON.stringify({...s.prepared.prepared,files:s.prepared.prepared.files.map(f=>({id:f.id,kind:f.kind,name:f.name,...(f.mime ? {mime:f.mime} : {})}))},null,2)}),...s.prepared.prepared.files.map(showFile),button('Send to refiner',()=>{if(canEdit(controller.getState())){void controller.send();setDialog(null)}},!!s.job)]}),s.error && jsx('p',{role:'alert',children:s.error})]})
+  return jsxs('div',{className:'flex h-full min-h-0 flex-col overflow-hidden text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:[jsx('style',{children:`.pr-composer{container-type:inline-size}.pr-box{background:var(--composer-fill)}.pr-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto 28px;align-items:center;gap:6px}.pr-route-controls{display:flex;align-items:center;min-width:0;gap:4px}.pr-route-pill{display:inline-flex;align-items:center;gap:4px;height:var(--composer-control-size,1.5rem);min-width:0;max-width:180px;padding:0 8px;border:0;border-radius:6px;background:transparent;font-family:inherit;font-size:var(--text-xs,.75rem);line-height:var(--text-xs--line-height,1rem);font-weight:400;color:var(--ui-text-tertiary);white-space:nowrap}.pr-route-pill:hover{background:var(--chrome-action-hover)}.pr-route-pill span{overflow:hidden;text-overflow:ellipsis}.pr-route-pill svg{width:10px;height:10px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}.pr-input{display:block;width:100%;min-width:0;margin:0;padding:5px 0 3px;border:0;outline:none;background:transparent;box-shadow:none;resize:none;overflow-y:auto;line-height:20px;font-size:14px}.pr-send{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:var(--dt-foreground);color:var(--dt-background);line-height:0}.pr-send svg{display:block;padding:0}.pr-add{display:grid;place-items:center;width:24px;height:28px;padding:0;border:0;background:transparent}.pr-grip{position:absolute;left:50%;top:-7px;z-index:1;width:48px;height:12px;transform:translateX(-50%);padding:0;border:0;background:transparent;cursor:ns-resize;touch-action:none}.pr-chip{display:flex;align-items:center;gap:6px;max-width:230px;min-width:0}.pr-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr-thumb{width:32px;height:32px;object-fit:cover;flex:none}@container(max-width:440px){.pr-row{grid-template-columns:24px minmax(0,1fr) 28px}.pr-route-controls{grid-column:2;grid-row:2}.pr-send{grid-column:3;grid-row:1}}`}),
+    jsxs('header',{className:'flex items-center justify-between border-b border-(--ui-stroke-secondary) px-4 py-3',children:[jsx('span',{children:'Prompt refiner'}),button('Discard refinement',()=>{if(sameDiscussion(controller.getState()))controller.discard()})]}),
+    jsxs('main',{className:'min-h-0 flex-1 overflow-auto p-4',children:[!s.turns.length && !s.candidate && jsx('div',{className:'grid h-full place-items-center text-base text-(--ui-text-tertiary)',children:'Refine your prompt'}),...s.turns.map((turn,i)=>jsxs('div',{className:'mb-4',children:[jsx('strong',{children:turn.role === 'user' ? 'You' : 'Refiner'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:turn.text})]},i)),s.reportedRoute && jsx('p',{className:'text-xs text-(--ui-text-tertiary)',children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),s.candidate && jsxs('div',{className:'mt-4 space-y-2',children:[field('Candidate prompt',s.candidate,v=>{if(sameDiscussion(controller.getState()))controller.editCandidate(v)}),button('Copy prompt',()=>{if(sameDiscussion(controller.getState()))void controller.copy()})]}),s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:s.proposal}),button('Apply proposal',()=>{if(sameDiscussion(controller.getState()))controller.applyProposal()})]}),status.isError && jsx('p',{role:'alert',children:'Status unavailable. The request may still be running.'}),s.message && jsx('p',{children:s.message}),s.error && jsx('p',{role:'alert',children:s.error})]}),
+    jsxs('div',{className:'p-3 pr-composer',children:[jsxs('div',{className:'relative rounded-md border border-(--ui-stroke-secondary) p-2 pr-box',children:[jsx('button',{type:'button',role:'separator','aria-label':'Resize message input','aria-orientation':'horizontal','aria-valuemin':28,'aria-valuemax':160,'aria-valuenow':inputHeight,className:'pr-grip',onPointerDown:e=>{if(e.button!==0)return;drag.current={pointer:e.pointerId,y:e.clientY,height:inputHeight};e.currentTarget.setPointerCapture(e.pointerId);e.preventDefault()},onPointerMove:e=>{if(drag.current?.pointer===e.pointerId)resize(drag.current.height+drag.current.y-e.clientY)},onPointerUp:()=>{drag.current=null},onPointerCancel:()=>{drag.current=null},onLostPointerCapture:()=>{drag.current=null},onKeyDown:e=>{if(!['ArrowUp','ArrowDown','Home','End'].includes(e.key))return;e.preventDefault();resize(e.key==='Home'?28:e.key==='End'?160:inputHeight+(e.key==='ArrowUp'?20:-20))},children:jsx('span',{style:{display:'block',width:'26px',height:'2px',margin:'auto',borderRadius:'2px',background:'var(--ui-stroke-secondary)'}})}),
+      (s.selection.length > 0 || s.files.length > 0) && jsxs('div',{className:'mb-2 flex flex-wrap gap-2',children:[s.selection.length > 0 && jsxs('div',{className:'rounded border border-(--ui-stroke-secondary) p-2',children:[`${s.selection.length} chat messages `,button('Remove context',()=>{if(sameDiscussion(controller.getState()))void controller.setSelection({messages:[]})})]}),...s.files.map(f=>jsxs('div',{className:'pr-chip rounded border border-(--ui-stroke-secondary) p-2',children:[f.kind === 'image' && jsx('img',{className:'pr-thumb',src:`data:${f.mime};base64,${f.data_base64}`,alt:f.name}),jsx('span',{className:'pr-chip-name',children:f.name}),button(`Remove ${f.name}`,()=>{const current=controller.getState();if(sameDiscussion(current))void controller.setSelection({files:current.files.filter(item=>item.id!==f.id)})})]},f.id))]}),
+      jsxs('div',{className:'pr-row',children:[jsx(DropdownMenu,{open:addOpen,onOpenChange:setAddOpen,children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsx('button',{type:'button','aria-label':'Add context or attachments',className:'pr-add',children:'+'})}),addOpen && jsx(DropdownMenuContent,{children:['Chat context','Files','Images'].map(label=>jsx(DropdownMenuItem,{onSelect:()=>{if(!sameDiscussion(controller.getState()))return;setAddOpen(false);setDialog(label)},children:label},label))})]})}),jsx(Textarea,{ref:inputRef,rows:1,value:s.userInput,placeholder:'Message the refiner…','aria-label':'Message the refiner',disabled:!!s.job,className:'pr-input min-w-0 resize-none border-0 bg-transparent shadow-none',style:{height:`${inputHeight}px`,minHeight:'28px',maxHeight:'160px'},onChange:e=>{if(!canEdit(controller.getState()))return;controller.setInput({userInput:e.target.value});e.target.style.height='28px';setInputHeight(Math.max(manualHeight.current,Math.min(160,e.target.scrollHeight)))}}),menu,jsx('button',{type:'button','aria-label':'Send',disabled:!!s.job,onClick:()=>{if(!controller.getState().job)setDialog('Review request')},className:'pr-send',children:jsx('svg',{viewBox:'0 0 24 24',width:16,height:16,fill:'none',stroke:'currentColor',strokeWidth:1.5,strokeLinecap:'round',strokeLinejoin:'round',children:jsx('path',{d:'M12 20V4M5 11l7-7 7 7'})})})]})]})]}),
+    dialog && jsx(Dialog,{open:true,onOpenChange:open=>{if(!open)setDialog(null)},children:jsxs(DialogContent,{className:'max-h-[85vh] overflow-auto',children:[jsx(DialogTitle,{children:dialog}),dialog === 'Chat context' ? contextDialog : dialog === 'Files' || dialog === 'Images' ? fileDialog : review,button('Done',()=>setDialog(null))]})})
   ]})
 }
 
