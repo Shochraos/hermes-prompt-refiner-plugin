@@ -426,8 +426,9 @@ function Panel({controller, store, ctx}) {
     .pr-input{display:block;box-sizing:border-box;field-sizing:content;width:100%;min-width:0;min-height:var(--pr-input-height);max-height:160px;margin:0;padding:max(.25rem,calc((28px - 1lh) / 2)) 0;border:0;outline:none;background:transparent;resize:none;overflow-y:auto;color:var(--ui-text-primary)}
     .pr-input:placeholder-shown{height:max(var(--pr-input-height),calc(1lh + .5rem))}
     .pr-input::placeholder{color:var(--ui-text-tertiary);opacity:1;white-space:nowrap;text-overflow:ellipsis}
-    .pr-send{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:var(--dt-foreground);color:var(--dt-background);line-height:0}
-    .pr-send:disabled{opacity:.5}
+    .pr-send{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:var(--dt-primary);color:var(--dt-primary-foreground);line-height:0}
+    .pr-send:enabled:hover{background:color-mix(in srgb,var(--dt-primary) 90%,transparent)}
+    .pr-send:disabled{background:color-mix(in srgb,var(--dt-primary) 30%,transparent);color:var(--dt-foreground)}
     .pr-send svg{display:block;padding:0}
     .pr-add{display:grid;place-items:center;width:24px;height:28px;padding:0;border:0;background:transparent}
     .pr-grip{position:absolute;left:50%;top:-7px;z-index:1;width:48px;height:12px;transform:translateX(-50%);padding:0;border:0;background:transparent;cursor:ns-resize;touch-action:none}
