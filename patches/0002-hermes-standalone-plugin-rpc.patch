@@ -1,0 +1,51 @@
+--- a/tui_gateway/rpc_dispatch.py
++++ b/tui_gateway/rpc_dispatch.py
+@@ -19,7 +19,14 @@
+     if isinstance(normalized, dict):
+         return normalized
+     rid, method, params = normalized
+-    if not (fn := _methods.get(method)):
++    fn = _methods.get(method)
++    if fn is None and method.startswith("plugin."):
++        if "profile" in params and (not isinstance(params["profile"], str) or not params["profile"].strip()):
++            return _err(rid, -32602, "invalid profile")
++        if params.get("session_id") is not None and not isinstance(params["session_id"], str):
++            return _err(rid, -32602, "invalid session_id")
++        fn = _profile_scoped(lambda rid, params: _standalone_plugin_rpc(rid, method, params))
++    if fn is None:
+         return _err(rid, -32601, _contracts.unknown_method_message(method))
+     # Test doubles register straight into ``_methods`` without a contract; every production
+     # handler comes through ``register_method`` and therefore has one.
+@@ -49,6 +56,23 @@
+     return response
+ 
+ 
++def _standalone_plugin_rpc(rid, method, params):
++    import json
++    from hermes_cli.plugin_rpc import plugin_rpc_handler
++    from hermes_cli.plugins_dispatch import resolve_plugin_command_result
++
++    try:
++        handler = plugin_rpc_handler(method)
++        if handler is None:
++            return _err(rid, -32601, _contracts.unknown_method_message(method))
++        handler_params = {key: value for key, value in params.items() if key != "profile"}
++        result = resolve_plugin_command_result(handler(handler_params, session_id=params.get("session_id") or None))
++        return _ok(rid, json.loads(json.dumps(result, allow_nan=False)))
++    except Exception:
++        logger.warning("standalone plugin RPC failed")
++        return _err(rid, -32000, "plugin RPC failed")
++
++
+ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
+     """Route inbound RPCs — long handlers to the pool (returns None; the worker writes its own
+     response via the bound transport), everything else inline (returns the response dict).
+@@ -66,7 +90,7 @@
+         normalized = _normalize_request(req)
+         if isinstance(normalized, dict):
+             return normalized
+-        if normalized[1] not in _LONG_HANDLERS:
++        if normalized[1] not in _LONG_HANDLERS and not normalized[1].startswith("plugin."):
+             return handle_request(req)
+         from hermes_cli.backend_retirement import retirement
+ 

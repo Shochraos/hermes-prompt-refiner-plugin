@@ -7,7 +7,7 @@ Prompt Refiner is an optional Hermes Desktop plugin for discussing and editing a
 ## Installation
 
 > [!IMPORTANT]
-> Apply the Desktop patch in [`patches/`](patches/) before building Desktop to enable the temporary model picker. Installing or building this plugin does not apply the patch to Hermes. Without the required Desktop capability, the picker remains disabled.
+> Apply the Desktop selection-only patch before building Desktop to enable the temporary model picker. The standalone dashboard/serve backend also needs the plugin-RPC host patch. Building or installing this plugin applies neither patch. Without the Desktop capability, the picker remains disabled.
 
 Build the payload with `nix build .#default`. The result contains a directory plugin under `share/hermes/plugins/prompt-refiner`; building it does not install or enable it. Installation and enabling require a compatible Hermes Desktop and backend, and use the host's plugin management workflow. This project targets Hermes source commit `081e8d9b75b2bedae297a89232b04ef9be7b26a0` for source compatibility, not a minimum release guarantee. Installed Desktop and gateway compatibility require separate verification.
 
@@ -17,23 +17,26 @@ Temporary model selection requires the host's `plugins.entries.prompt-refiner.ll
 
 For development on x86_64-linux, enter `nix develop` and run `bash scripts/check.sh` with `TMPDIR` or `XDG_CACHE_HOME` set to a writable scratch directory. The full offline checks require the plugin and tests to be present. `nix flake check` also runs the offline check. No provider call or plugin installation is part of these checks.
 
-### Desktop patch
+### Host patches
 
-This source-only patch targets Hermes commit `081e8d9b75b2bedae297a89232b04ef9be7b26a0`:
+These source-only patches target Hermes commit `081e8d9b75b2bedae297a89232b04ef9be7b26a0`:
 
 - [`0001-hermes-desktop-selection-only.patch`](patches/0001-hermes-desktop-selection-only.patch) adds the Desktop SDK's selection-only model catalog and capability flag. Temporary picks do not write global custom-model, favorite, visibility or provider-folding preferences.
+- [`0002-hermes-standalone-plugin-rpc.patch`](patches/0002-hermes-standalone-plugin-rpc.patch) enables registered plugin RPC methods on the standalone dashboard/serve backend. [`0003-hermes-standalone-plugin-rpc-tests.patch`](patches/0003-hermes-standalone-plugin-rpc-tests.patch) separately adds upstream regression tests; it is not needed in a filtered runtime source tree.
 
-From a clean Hermes source checkout at that revision, set `refiner` to this plugin checkout's absolute path and apply the patch:
+From a clean Hermes source checkout at that revision, set `refiner` to this plugin checkout's absolute path and apply the patches needed by your build:
 
 ```bash
 refiner=/absolute/path/to/hermes-prompt-refiner-plugin
 git apply --check "$refiner/patches/0001-hermes-desktop-selection-only.patch"
 git apply "$refiner/patches/0001-hermes-desktop-selection-only.patch"
+git apply --check "$refiner/patches/0002-hermes-standalone-plugin-rpc.patch"
+git apply "$refiner/patches/0002-hermes-standalone-plugin-rpc.patch"
 ```
 
-Rebuild and install Desktop through its normal packaging workflow. Apply the patch to each Desktop client; the serving backend, including a Docker backend, does not need a Python patch. For a Nix-managed Desktop, apply the patch to the renderer source derivation before compilation, not only to the outer Electron wrapper. The patch omits upstream tests and documentation so it can also apply to build-filtered source trees.
+Rebuild and install each Desktop client and the standalone serving backend through their normal packaging workflows; for Docker, patch the backend source used to build the image. For a Nix-managed Desktop, apply patch 0001 to the renderer source derivation before compilation, not only to the outer Electron wrapper. Apply patch 0002 to the backend source. No Python reasoning extension or proxy migration is required. The runtime patches omit upstream tests and documentation so they can apply to build-filtered source trees.
 
-Other Hermes revisions require a separate compatibility check. Do not force a failed patch application or apply a patch twice if its changes are already present. This patch does not resolve an unconfigured auxiliary route, grant image compatibility, or establish live provider acceptance.
+Other Hermes revisions require a separate compatibility check. Do not force a failed patch application or apply a patch twice if its changes are already present. These patches do not resolve an unconfigured auxiliary route, grant image compatibility, or establish live provider acceptance.
 
 ## Usage
 
@@ -43,7 +46,7 @@ Other Hermes revisions require a separate compatibility check. Do not force a fa
 4. Choose the Send arrow to open the review dialog, then Prepare preview to upload selected inputs to the captured Hermes backend for validation and text redaction. Inspect the preview before choosing Send to refiner, which sends it through Hermes model routing. Image pixels are not redacted. Hermes may use a vision model or fallback provider; requested labels do not lock the execution route.
 5. Continue the discussion, edit the candidate and choose Copy prompt. Paste it yourself, reattach any needed original files and send it normally. Copy does not submit or modify the composer.
 
-Discard clears the temporary refinement state; hiding the pane preserves it. Closing the sole plugin pane disables the plugin. Clearing state does not revoke folder access, erase copied text or remove provider or host logs, and does not guarantee cancellation of an in-flight request or billing.
+Discard clears the temporary refinement state; hiding or closing and reopening the pane preserves temporary input. Clearing state does not revoke folder access, erase copied text or remove provider or host logs, and does not guarantee cancellation of an in-flight request or billing.
 
 ## Architecture
 
