@@ -12,7 +12,7 @@ Edit this checkout at `/opt/data/projects/hermes-prompt-refiner`. Build only as 
 
 ## Implementation rules
 
-Use the public Hermes SDK and pinned source baseline. Ordinary Send is untouched. Only explicit selection and explicit Prepare/Send disclose inputs. Keep the refiner tool-free, temporary and copy-only: never write a composer, paste or submit. Fail closed on ambiguous owners, unsupported types, missing APIs and unconfirmed image routes. Do not persist content or capabilities, read secrets, log raw errors or reclaim shared folder grants.
+Use the public Hermes SDK and pinned source baseline. Ordinary chat Send is untouched. Only Send in the refiner pane uploads the message, refinement history and selected context for validation and model use. Keep the refiner tool-free, temporary and copy-only: never write a composer, paste or submit. Fail closed on ambiguous owners, unsupported types, missing APIs and unconfirmed image routes. Do not persist content or capabilities, read secrets, log raw errors or reclaim shared folder grants.
 
 Prefer simple Python and uncompiled ESM; operational scripts are Bash. Add no dependencies or framework outside the approved design. Do not add code comments except mandatory directives; use clear names and contract docstrings where necessary.
 
