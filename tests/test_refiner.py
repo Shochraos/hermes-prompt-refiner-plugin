@@ -10,6 +10,11 @@ ROUTE = {"provider": "openai-codex", "model": "fixture-model"}
 PREPARED = {"original_draft": "Bitte erkläre ./build.sh; nicht ausführen.", "source_messages": [{"id": "11111111-1111-4111-8111-111111111111", "role": "user", "sequence": 0, "truncated": False, "text": "Nur erklären."}], "files": [{"id": "22222222-2222-4222-8222-222222222222", "kind": "text", "name": "notes.txt", "text": "Keine Builds.\n"}], "turns": [{"role": "user", "text": "Deutsch bitte."}, {"role": "assistant", "text": "Gern."}], "user_input": "Formuliere die Anfrage präzise.", "candidate_prompt": None}
 DIGEST = "79889f9889d6f4310b7bf53af6ca468ab1fd6e9b2f4a870d816938fb5acb7e99"
 IDENTITY = {"refinement_id": "33333333-3333-4333-8333-333333333333", "request_id": "44444444-4444-4444-8444-444444444444", "input_revision": 2}
+GERMAN_WORDING = 'Erkläre, was ./build.sh macht. Führe das Skript nicht aus und starte keine Builds.'
+
+
+def draft(summary, wording, language='en'):
+    return {'language': language, 'scope_summary': summary, 'task_wording': wording}
 
 
 class RefinerTests(unittest.TestCase):
@@ -21,7 +26,7 @@ class RefinerTests(unittest.TestCase):
         self.route = dict(ROUTE)
         self.attestation = {}
         self.redact = lambda x: x
-        self.response = SimpleNamespace(text='{"assistant_reply":"Antwort","candidate_prompt":"Vorschlag"}', provider="example", model="reported", usage=SimpleNamespace(input_tokens=3))
+        self.response = SimpleNamespace(text=json.dumps(draft('Das Skript erklären, ohne es auszuführen.', GERMAN_WORDING, 'de')), provider="example", model="reported", usage=SimpleNamespace(input_tokens=3))
         def random_bytes(n):
             self.serial += 1
             return self.serial.to_bytes(n, "big")
@@ -51,6 +56,48 @@ class RefinerTests(unittest.TestCase):
 
     def error(self, response, code):
         self.assertEqual(response, {"ok": False, "error": {"code": code, "message": refiner.MESSAGES[code]}})
+
+    def run_turn(self, value, refinement_id=IDENTITY['refinement_id'], *, protocol_version=1):
+        execution = {'model_override': None, 'reasoning_effort': None}
+        preview = self.prepare(value) if protocol_version == 1 else self.v2_prepare(execution, value=value)
+        self.assertTrue(preview['ok'], preview)
+        prepared = preview['data']
+        identity = dict(IDENTITY, refinement_id=refinement_id, request_id=f'{self.serial:08x}-4444-4444-8444-444444444444')
+        if protocol_version == 1:
+            started = self.start(identity=identity, prepared=prepared['prepared'], digest=prepared['preview_digest'])
+        else:
+            started = self.v2_start(prepared, identity)
+        self.assertTrue(started['ok'], started)
+        request = {'protocol_version': protocol_version, **started['data']}
+        self.queue.pop(0)()
+        status = self.service.status(request)['data']
+        self.assertTrue(self.service.release(request)['data']['released'])
+        return status
+
+    def review(self, value, wording, *, protocol_version=1):
+        status = self.run_turn(value, protocol_version=protocol_version)
+        self.assertEqual(status['state'], 'succeeded', status)
+        result = status['result']
+        self.assertIsNone(result['candidate_prompt'])
+        self.assertIn(wording, result['assistant_reply'])
+        value['turns'].extend([{'role': 'user', 'text': value['user_input']}, {'role': 'assistant', 'text': result['assistant_reply']}])
+        return result['assistant_reply']
+
+    def test_scope_correction_is_not_a_final_prompt(self):
+        value = self.raw()
+        wording = 'Suggest ways to simplify my Nix configuration by removing duplication and organizing modules.'
+        self.response.text = json.dumps({'assistant_reply': 'I added module organization.', 'candidate_prompt': wording})
+        value.update(user_input='Add module organization.', turns=[
+            {'role': 'user', 'text': 'How can I simplify my Nix configuration and remove duplication?'},
+            {'role': 'assistant', 'text': 'I can help with that.'},
+        ])
+        status = self.run_turn(value)
+        self.assertEqual(status['state'], 'succeeded', status)
+        result = status['result']
+        self.assertIsNone(result['candidate_prompt'])
+        self.assertIn(wording, result['assistant_reply'])
+        self.assertIn('Does this cover what you want?', result['assistant_reply'])
+        self.assertIn('Use this prompt', result['assistant_reply'])
 
     def test_registration_is_lazy_and_limited(self):
         import importlib.util
@@ -214,10 +261,11 @@ class RefinerTests(unittest.TestCase):
         self.assertEqual(self.service.status(self.request(data))["data"]["state"], "pending")
         self.queue.pop()()
         call = self.calls[0]
-        self.assertEqual(set(call), {"instructions", "input", "json_schema", "json_mode", "schema_name", "system_prompt", "task", "temperature", "max_tokens", "timeout", "purpose"})
-        self.assertEqual(call["instructions"], refiner.REQUEST_INSTRUCTION)
+        self.assertEqual(set(call), {"instructions", "input", "json_mode", "schema_name", "system_prompt", "task", "temperature", "max_tokens", "timeout", "purpose"})
+        instructions, schema = call['instructions'].split('\n\nJSON schema:\n')
+        self.assertEqual(instructions, refiner.REQUEST_INSTRUCTION)
+        self.assertEqual(json.loads(schema), refiner.REPLY_SCHEMA)
         self.assertEqual(call["system_prompt"], refiner.SYSTEM_INSTRUCTION)
-        self.assertEqual(call["json_schema"], refiner.REPLY_SCHEMA)
         self.assertEqual((call["task"], call["max_tokens"], call["timeout"], call["purpose"]), ("prompt_refinement", 4096, 90, "prompt-refinement"))
         self.assertEqual(json.loads(call["input"][0]["text"]), {"original_draft": PREPARED["original_draft"], "source_messages": PREPARED["source_messages"], "text_files": PREPARED["files"], "refinement_turns": PREPARED["turns"], "current_user_input": PREPARED["user_input"], "current_candidate": None, "image_manifest": []})
         result = self.service.status(self.request(data))["data"]
@@ -229,50 +277,107 @@ class RefinerTests(unittest.TestCase):
         self.assertEqual(self.service.release(self.request(data))["data"], {"released": True, "abandoned": False})
         self.error(self.service.status(self.request(data)), "job_not_found")
 
-    def test_dialogue_contract_is_sent_on_every_turn(self):
+    def test_german_scope_review_and_natural_approval(self):
         value = self.raw()
         value.update(original_draft='', turns=[], candidate_prompt=None,
-                     user_input='Wie organisiere ich meine Nix-Konfiguration?')
-        replies = [
-            {'assistant_reply': 'Wie kann ich meine Nix-Konfiguration sinnvoll organisieren? Schlage mögliche Strukturen vor und erkläre ihre Vor- und Nachteile.\n\nMöchtest du etwas ändern oder ist das bereit?', 'candidate_prompt': None},
-            {'assistant_reply': 'Wie kann ich meine Nix-Konfiguration sinnvoll organisieren? Vergleiche mögliche Strukturen und berücksichtige mehrere Rechner.\n\nMöchtest du etwas ändern oder ist das bereit?', 'candidate_prompt': None},
-            {'assistant_reply': 'Hier ist der fertige Prompt.', 'candidate_prompt': 'Wie kann ich meine Nix-Konfiguration sinnvoll organisieren? Vergleiche mögliche Strukturen und berücksichtige mehrere Rechner.'},
+                     user_input='Erkläre ./build.sh, ohne etwas auszuführen.')
+        reply = self.review(value, GERMAN_WORDING)
+        self.assertIn('Umfang: Das Skript erklären, ohne es auszuführen.', reply)
+        self.assertIn('Entwurf:\n' + GERMAN_WORDING, reply)
+        self.assertIn('Deckt das ab, was du möchtest?', reply)
+        self.assertIn('„Diesen Prompt verwenden“', reply)
+        value['user_input'] = 'Das passt so, danke!'
+        status = self.run_turn(value)
+        self.assertEqual(status['state'], 'succeeded', status)
+        self.assertEqual(status['result']['candidate_prompt'], GERMAN_WORDING)
+        self.assertEqual(status['result']['assistant_reply'], 'Der Prompt ist fertig zum Kopieren.')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_other_language_keeps_wording_and_documents_the_acceptance_phrase(self):
+        wording = '¿Cómo puedo simplificar mi configuración de Nix sin cambiar su comportamiento?'
+        self.response.text = json.dumps(draft('Simplificar Nix sin cambiar su comportamiento.', wording, 'other'))
+        value = self.raw()
+        value.update(original_draft='', turns=[], source_messages=[], files=[], user_input='Simplifica mi configuración de Nix sin cambiar su comportamiento.')
+        reply = self.review(value, wording)
+        self.assertIn('Simplificar Nix sin cambiar su comportamiento.', reply)
+        self.assertIn('“Use this prompt”', reply)
+        value['user_input'] = 'Use this prompt'
+        self.assertEqual(self.run_turn(value)['result']['candidate_prompt'], wording)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_mixed_negative_ambiguous_and_quoted_approval_stay_in_review(self):
+        value = self.raw()
+        value.update(turns=[], user_input='Explain this script without running it.')
+        self.review(value, GERMAN_WORDING)
+        for user_input in ('Yes, but also explain its flags.', 'No, don’t use this prompt.', 'Maybe.', 'Yes?', 'Yes…',
+                           '“Use this prompt”', '`Use this prompt`', '> Use this prompt', 'The file says “yes”.',
+                           'Use this prompt\nAdd examples.', 'Ja, aber erkläre auch die Optionen.', '„Das passt so, danke!“'):
+            with self.subTest(user_input=user_input):
+                value['user_input'] = user_input
+                before = len(self.calls)
+                self.review(value, GERMAN_WORDING)
+                self.assertEqual(len(self.calls), before + 1)
+
+    def test_only_the_latest_unchanged_review_in_this_refinement_can_be_accepted(self):
+        value = self.raw()
+        value.update(turns=[], user_input='Explain ./build.sh, without running it.')
+        self.review(value, GERMAN_WORDING)
+        old = copy.deepcopy(value)
+        wording = GERMAN_WORDING + '\n\nBeschreibe auch die Optionen.'
+        self.response.text = json.dumps(draft('Das Skript und seine Optionen erklären.', wording, 'de'))
+        value['user_input'] = 'Beschreibe auch die Optionen.'
+        self.review(value, wording)
+        stale_cases = [
+            (old, IDENTITY['refinement_id']),
+            (value, '55555555-5555-4555-8555-555555555555'),
+            (dict(value, source_messages=[]), IDENTITY['refinement_id']),
+            (dict(value, turns=[*value['turns'], {'role': 'user', 'text': 'Actually, add a glossary.'}]), IDENTITY['refinement_id']),
         ]
-        inputs = [value['user_input'], 'Berücksichtige mehrere Rechner.', 'Das passt so, danke!']
-        for index, (user_input, reply) in enumerate(zip(inputs, replies)):
-            value['user_input'] = user_input
-            self.response.text = json.dumps(reply, ensure_ascii=False)
-            preview = self.prepare(value)['data']
-            ident = dict(IDENTITY, request_id=f'{index:08x}-4444-4444-8444-444444444444')
-            data = self.start(identity=ident, prepared=preview['prepared'], digest=preview['preview_digest'])['data']
-            self.queue.pop()()
-            state = self.service.status(self.request(data))['data']
-            self.assertEqual(state['state'], 'succeeded')
-            self.assertEqual(state['result']['assistant_reply'], reply['assistant_reply'])
-            self.assertEqual(state['result']['candidate_prompt'], reply['candidate_prompt'])
-            call = self.calls[-1]
-            contract = call['system_prompt'] + ' ' + call['instructions']
-            for phrase in ('do not perform', 'full', 'candidate_prompt', 'assistant_reply', 'satisfaction', 'unresolved', 'approval'):
-                self.assertIn(phrase, contract.lower())
-            self.assertNotIn('Answer current_user_input', contract)
-            payload = json.loads(call['input'][0]['text'])
-            self.assertEqual(payload['current_user_input'], user_input)
-            self.assertEqual(payload['refinement_turns'], value['turns'])
-            self.assertIsNone(payload['current_candidate'])
-            value['turns'].extend([{'role': 'user', 'text': user_input}, {'role': 'assistant', 'text': reply['assistant_reply']}])
-            self.service.release(self.request(data))
+        for stale, refinement_id in stale_cases:
+            with self.subTest(stale=stale, refinement_id=refinement_id):
+                status = self.run_turn(dict(stale, user_input='Yes'), refinement_id)
+                self.assertEqual(status['state'], 'succeeded', status)
+                self.assertIsNone(status['result']['candidate_prompt'])
+                self.assertIn(wording, status['result']['assistant_reply'])
+
+    def test_model_must_recover_from_acknowledgement_or_question_only_output(self):
+        value = self.raw()
+        value.update(turns=[], user_input='How can I simplify my Nix configuration?')
+        wording = 'Review my Nix configuration and suggest ways to simplify it without changing behavior.'
+        for bad in ('Which Nix setup are you using? What version?', 'Okay, I can do that.'):
+            with self.subTest(bad=bad):
+                outputs = iter([{'assistant_reply': bad, 'candidate_prompt': None}, draft('Ways to simplify Nix.', wording)])
+                calls = []
+                def model(**kwargs):
+                    calls.append(kwargs)
+                    self.now += 5
+                    return SimpleNamespace(text=json.dumps(next(outputs)), usage=SimpleNamespace(output_tokens=30))
+                self.service.model_complete = model
+                reply = self.review(value, wording)
+                self.assertNotIn(bad, reply)
+                self.assertIn('Does this cover what you want?', reply)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1]['timeout'], 85)
+                self.assertEqual(calls[1]['max_tokens'], 4066)
+                value['user_input'] = 'Add module organization.'
 
     def test_dialogue_through_host_facade(self):
         try:
             import agent.plugin_llm as facade
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
+            if exc.name not in ('agent', 'agent.plugin_llm'):
+                raise
             self.skipTest('Hermes host facade is not on this Python path')
         from unittest.mock import patch
         calls = []
+        initial = 'Review my Nix configuration and suggest ways to simplify it without changing behavior.'
+        duplication = initial + ' Focus on removing duplicated settings.'
+        modules = duplication + '\n\nAlso suggest how to organize modules. Do not edit any files.'
         outputs = iter([
-            {'assistant_reply': 'Proposed wording. Change anything or ready?', 'candidate_prompt': None},
-            {'assistant_reply': 'Revised wording. Change anything or ready?', 'candidate_prompt': None},
-            {'assistant_reply': 'Ready.', 'candidate_prompt': 'Revised wording.'},
+            {'assistant_reply': 'Is this NixOS or Home Manager?', 'candidate_prompt': None},
+            draft('Simplify the Nix configuration.', initial),
+            draft('Simplify Nix and remove duplication.', duplication),
+            {'assistant_reply': 'I added module organization.', 'candidate_prompt': modules},
         ])
         def invoke(**kwargs):
             calls.append(kwargs)
@@ -284,41 +389,45 @@ class RefinerTests(unittest.TestCase):
         value = self.raw()
         value.update(original_draft='', turns=[], candidate_prompt=None)
         with patch.object(facade, '_resolve_task_ownership', return_value=(frozenset(['prompt_refinement']), frozenset())):
-            for index, user_input in enumerate(['How should I organize my Nix configuration?', 'Include multiple machines.', 'That works, thanks!']):
+            reviewed = [('How can I simplify my Nix configuration?', initial),
+                        ('Focus on removing duplication.', duplication), ('Add module organization.', modules)]
+            for user_input, wording in reviewed:
                 value['user_input'] = user_input
-                preview = self.prepare(value)['data']
-                ident = dict(IDENTITY, request_id=f'{index:08x}-4444-4444-8444-444444444444')
-                data = self.start(identity=ident, prepared=preview['prepared'], digest=preview['preview_digest'])['data']
-                self.queue.pop()()
-                state = self.service.status(self.request(data))['data']
-                self.assertEqual(state['state'], 'succeeded', state)
+                previous_turns = copy.deepcopy(value['turns'])
+                reply = self.review(value, wording, protocol_version=2)
+                self.assertIn('Scope:', reply)
+                self.assertIn('Draft prompt:\n' + wording, reply)
+                self.assertIn('Does this cover what you want?', reply)
+                self.assertIn('“Use this prompt” or tell me what to change.', reply)
+                self.assertNotIn('I added module organization.', reply)
+                self.assertNotIn('Is this NixOS or Home Manager?', reply)
                 messages = calls[-1]['messages']
                 self.assertEqual([message['role'] for message in messages], ['system', 'user'])
-                self.assertIn('full working wording', messages[0]['content'])
-                self.assertIn('naturally expresses satisfaction', messages[0]['content'])
+                self.assertEqual(calls[-1]['extra_body'], {'response_format': {'type': 'json_object'}})
                 parts = messages[1]['content']
-                self.assertIn('not as a task to perform', parts[0]['text'])
                 payload = json.loads(parts[1]['text'])
                 self.assertEqual(payload['current_user_input'], user_input)
-                self.assertEqual(payload['refinement_turns'], value['turns'])
-                self.assertEqual(state['result']['candidate_prompt'], None if index < 2 else 'Revised wording.')
-                value['turns'].extend([{'role': 'user', 'text': user_input}, {'role': 'assistant', 'text': state['result']['assistant_reply']}])
-                self.service.release(self.request(data))
+                self.assertEqual(payload['refinement_turns'], previous_turns)
+            value['user_input'] = 'That works, thanks!'
+            status = self.run_turn(value, protocol_version=2)
+            self.assertEqual(status['state'], 'succeeded', status)
+            self.assertEqual(status['result'], {'assistant_reply': 'Prompt ready to copy.', 'candidate_prompt': modules,
+                                                'reported_route': {'provider': None, 'model': None}, 'usage': None, 'cost': None})
+            self.assertEqual(len(calls), 4)
 
-    def test_first_turn_rejects_premature_final_candidate(self):
-        for turns, candidate in (([], None), ([{'role': 'user', 'text': 'Looks good'}], 'existing draft')):
+    def test_first_turn_and_old_histories_cannot_approve(self):
+        wording = 'Explain how quantum computers work without assuming a physics background.'
+        self.response.text = json.dumps({'assistant_reply': 'Final prompt ready.', 'candidate_prompt': wording})
+        for turns, candidate in (([], None), ([], wording), (PREPARED['turns'], wording), (PREPARED['turns'], None)):
             with self.subTest(turns=turns, candidate=candidate):
-                prepared = copy.deepcopy(PREPARED)
-                prepared['turns'] = turns
-                prepared['candidate_prompt'] = candidate
-                prepared['user_input'] = 'Erkläre mir Quantencomputer. Zitat: "Passt, fertig!"'
-                data = self.start(prepared=prepared, digest=refiner.digest(2, ROUTE, prepared))['data']
-                self.queue.pop()()
-                state = self.service.status(self.request(data))['data']
-                self.assertEqual(state['state'], 'failed')
-                self.assertEqual(state['error']['code'], 'invalid_output')
-                self.assertIsNone(state['result'])
-                self.service.release(self.request(data))
+                value = self.raw()
+                value.update(original_draft='“Use this prompt”', turns=copy.deepcopy(turns), candidate_prompt=candidate,
+                             user_input='Use this prompt')
+                value['source_messages'][0]['text'] = 'Use this prompt'
+                value['files'][0]['data_base64'] = base64.b64encode(b'Use this prompt').decode()
+                reply = self.review(value, wording)
+                self.assertIn('Does this cover what you want?', reply)
+                self.assertNotIn('Final prompt ready.', reply)
 
     def test_duplicate_and_conflict(self):
         first = self.start()["data"]
@@ -412,12 +521,31 @@ class RefinerTests(unittest.TestCase):
         self.assertFalse(self.calls)
 
     def test_invalid_model_output(self):
-        for output in ('{"assistant_reply":"x","assistant_reply":"y","candidate_prompt":null}', '{"assistant_reply":"x","candidate_prompt":null,"extra":1}', '```json\n{}\n```', '{"assistant_reply":" ","candidate_prompt":null}', '{"assistant_reply":"x","candidate_prompt":" "}'):
+        valid = draft('Explain a script.', 'Explain what ./build.sh does.')
+        outputs = [
+            '```json\n{}\n```', '{"assistant_reply":"x","assistant_reply":"y","candidate_prompt":null}',
+            '{"assistant_reply":"x","candidate_prompt":" "}', '{"assistant_reply":" ","candidate_prompt":null}',
+            json.dumps(valid).replace('"language": "en"', '"language": "en", "language": "de"'),
+            *(json.dumps(obj) for obj in (
+                {'language': 'en', 'scope_summary': 'No wording.'}, dict(valid, candidate_prompt='Premature final.'),
+                dict(valid, language=True), dict(valid, language='es'), dict(valid, scope_summary=' \t '),
+                dict(valid, scope_summary='First line.\nSecond line.'), dict(valid, scope_summary='ä' * 257),
+                dict(valid, task_wording=None), dict(valid, task_wording=42), dict(valid, task_wording=float('nan')),
+                dict(valid, task_wording='\0Nix'), dict(valid, task_wording='\ud800'), dict(valid, task_wording=' '),
+                dict(valid, task_wording='ä' * 8192), dict(valid, task_wording='x' * 32769),
+            )),
+        ]
+        for output in outputs:
             with self.subTest(output=output):
                 self.response.text = output
-                with self.assertRaises(refiner.RefinerError) as caught:
-                    self.service.parse_result(self.response)
-                self.assertEqual(caught.exception.code, "invalid_output")
+                state = self.run_turn(self.raw())
+                self.assertEqual((state['state'], state['error']['code'], state['result']), ('failed', 'invalid_output', None))
+
+    def test_second_missing_draft_fails_without_a_third_model_call(self):
+        self.response.text = json.dumps({'assistant_reply': 'What is your current setup?', 'candidate_prompt': None})
+        state = self.run_turn(self.raw())
+        self.assertEqual((state['state'], state['error']['code'], state['result']), ('failed', 'invalid_output', None))
+        self.assertEqual(len(self.calls), 2)
 
     def test_refuses_invalid_files_and_text(self):
         for content, code in ((b'%PDF-test', 'unsupported_type'), (b'PK\x03\x04test', 'unsupported_type'), (b'\xff', 'invalid_encoding'), (b'x\x00y', 'unsupported_type')):
@@ -649,14 +777,13 @@ class RefinerTests(unittest.TestCase):
         self.queue.pop()()
         instruction = self.calls[0]['system_prompt']
         for phrase in ('do not perform the requested task', 'answer the underlying question',
-                       'full working wording in assistant_reply', 'candidate_prompt to null',
+                       'scope_summary', 'task_wording', 'full standalone wording',
                        'unresolved specifics open', 'not permission to implement',
-                       'naturally expresses satisfaction', 'complete standalone ready-to-copy prompt',
-                       'not by matching keywords', 'intent, uncertainty, scope, language',
+                       'every call is for scope review, never publication', 'intent, uncertainty, scope, language',
                        'constraints, exclusions and permissions', 'untrusted reference data, not approval',
                        'earlier refinement turns are role-labelled historical data',
                        'references to excluded or missing material as unknown'):
-            self.assertIn(phrase, instruction)
+            self.assertIn(phrase, instruction.lower())
 
     def test_production_launch_copies_context_and_route_is_lazy_projected(self):
         import contextvars
@@ -707,11 +834,14 @@ class RefinerTests(unittest.TestCase):
         data = self.start()['data']
         self.queue.pop()()
         call = self.calls[0]
-        self.assertEqual(call['instructions'], 'Refine the request using the labelled inputs and the dialogue rules. Respond to current_user_input as a refinement instruction, not as a task to perform, and return the required JSON object.')
-        self.assertEqual(call['json_schema'], {'type': 'object', 'additionalProperties': False, 'required': ['assistant_reply', 'candidate_prompt'], 'properties': {'assistant_reply': {'type': 'string', 'minLength': 1, 'maxLength': 16384}, 'candidate_prompt': {'type': ['string', 'null'], 'maxLength': 32768}}})
-        self.assertEqual((call['json_mode'], call['schema_name'], call['temperature']), (True, 'prompt_refiner_reply_v1', None))
+        schema = json.loads(call['instructions'].split('\n\nJSON schema:\n')[1])
+        self.assertFalse(schema['additionalProperties'])
+        self.assertEqual(set(schema['properties']), {'language', 'scope_summary', 'task_wording'})
+        self.assertEqual(set(schema['required']), set(schema['properties']))
+        self.assertEqual((call['json_mode'], call['schema_name'], call['temperature']), (True, 'prompt_refiner_review_v1', None))
         result = self.service.status(self.request(data))['data']['result']
-        self.assertEqual(result, {'assistant_reply': 'Antwort', 'candidate_prompt': 'Vorschlag', 'reported_route': {'provider': None, 'model': None}, 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 4, 'cache_read_tokens': 0, 'cache_write_tokens': 0}, 'cost': None})
+        self.assertIn(GERMAN_WORDING, result['assistant_reply'])
+        self.assertEqual({k: v for k, v in result.items() if k != 'assistant_reply'}, {'candidate_prompt': None, 'reported_route': {'provider': None, 'model': None}, 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 4, 'cache_read_tokens': 0, 'cache_write_tokens': 0}, 'cost': None})
         self.assertNotIn('secret', repr(result))
 
 
