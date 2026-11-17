@@ -30,7 +30,7 @@ async function load({selectionOnly = true, oldSdk = false} = {}) {
   const react = {useState:v=>{const i=hook++;if (!(i in slots)) slots[i]=v;return [slots[i],value=>{slots[i]=typeof value==='function'?value(slots[i]):value}]},useRef:v=>{const i=hook++;if (!(i in slots)) slots[i]={current:v};return slots[i]},useEffect:(fn,deps)=>{const i=effectHook++;if(!effectsEnabled)return;if(!effectDeps[i] || deps.some((v,j)=>!Object.is(v,effectDeps[i][j]))){effectDeps[i]=deps;pendingEffects.push(fn)}}}
   const jsx = {jsx:(type,props,key)=>({type,props,key}),jsxs:(type,props,key)=>({type,props,key})}
   let bitmapCalls=0
-  const context = vm.createContext({TextEncoder,TextDecoder,crypto:webcrypto,Uint8Array,Blob,atob,btoa,console,createImageBitmap:async()=>{bitmapCalls++;return {width:1,height:1,close(){}}}})
+  const context = vm.createContext({TextEncoder,TextDecoder,crypto:webcrypto,Uint8Array,Blob,atob,btoa,console,ResizeObserver:class { constructor(measure){this.measure=measure} observe(el){el.measure=this.measure} disconnect(){} },createImageBitmap:async()=>{bitmapCalls++;return {width:1,height:1,close(){}}}})
   const namespaces = {'@hermes/plugin-sdk':sdk,'react':react,'react/jsx-runtime':jsx}
   const source = await readFile(new URL('../desktop/plugin.js',import.meta.url),'utf8')
   const mod = new vm.SourceTextModule(source,{context})
@@ -142,7 +142,7 @@ test('production panel creates a live status query with captured route and closu
   await new Promise(resolve=>setImmediate(resolve))
   const render=()=>f.render()
   const collect=(node,out=[])=>{if(!node||typeof node!=='object')return out;out.push(node);const children=node.props?.children;for(const child of Array.isArray(children)?children:[children])collect(child,out);return out}
-  let nodes=collect(render()), inputs=nodes.filter(n=>n.type?.name==='Textarea')
+  let nodes=collect(render()), inputs=nodes.filter(n=>n.type==='textarea')
   inputs[0].props.onChange({target:{value:'question',style:{},scrollHeight:28}})
   nodes=collect(render());nodes.find(n=>n.props?.['aria-label']==='Send').props.onClick()
   await new Promise(resolve=>setImmediate(resolve))
@@ -191,21 +191,48 @@ const nodes = (node,out=[]) => { if (!node || typeof node !== 'object') return o
 const tick = () => new Promise(resolve=>setImmediate(resolve))
 const actionNodes = f => { const action=f.contributions[1].render(); return nodes(action.type(action.props)) }
 const actionButton = f => actionNodes(f).find(n=>n.props?.children==='Refine')
+const messageInput = f => nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner')
 const click = (f,label) => nodes(f.render()).find(n=>n.props?.children===label || n.props?.['aria-label']===label).props.onClick()
 const pick = (f,label) => { nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Add context or attachments')).props.onOpenChange(true); nodes(f.render()).find(n=>n.type?.name==='DropdownMenuItem' && n.props.children===label).props.onSelect() }
-const typeMessage = (f,value) => nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner').props.onChange({target:{value,style:{},scrollHeight:28}})
+const typeMessage = (f,value) => messageInput(f).props.onChange({target:{value}})
 const review = f => nodes(f.render()).find(n=>n.props?.['aria-label']==='Send').props.onClick()
+const key = (input, options = {}) => {
+  const event = {key:'Enter',defaultPrevented:false,preventDefault(){this.defaultPrevented=true},...options}
+  input.props.onKeyDown?.(event)
+  return event.defaultPrevented
+}
 
 test('rendered send prepares and starts once, without a review dialog',async()=>{
   const f=await load(), wait=deferred()
   f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?wait.promise:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'hello')
-  const send=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send');send.props.onClick();send.props.onClick();await tick()
+  const send=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send'), input=messageInput(f)
+  assert.equal(key(input),true);send.props.onClick();key(input);await tick()
   assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,1)
   assert.equal(nodes(f.render()).some(n=>n.props?.children==='Review request'),false)
   const request=f.requests.find(r=>r[1].endsWith('prepare'))[2]
   wait.resolve({ok:true,data:{...golden,input_revision:request.input_revision,expected_route:request.expected_route,execution:request.execution,redacted:false}});await tick();await tick()
   assert.equal(f.requests.filter(r=>r[1].endsWith('start')).length,1)
+})
+
+test('only plain Enter in the message editor sends',async()=>{
+  const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  const controller=f.contributions[0].render().props.controller
+  controller.editCandidate('final prompt');typeMessage(f,'  \n  ')
+  assert.equal(nodes(f.render()).find(n=>n.props?.['aria-label']==='Send').props.disabled,true)
+  key(messageInput(f));review(f);await tick()
+  assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  typeMessage(f,'first paragraph\n\nsecond paragraph')
+  let input=messageInput(f)
+  for (const options of [{shiftKey:true},{ctrlKey:true},{metaKey:true},{altKey:true},{nativeEvent:{isComposing:true}},{nativeEvent:{keyCode:229}}]) assert.equal(key(input,options),false)
+  assert.equal(key(input,{repeat:true}),true)
+  input.props.onCompositionStart();input=messageInput(f);assert.equal(key(input),false);input.props.onCompositionEnd()
+  const final=nodes(f.render()).find(n=>n.props?.value==='final prompt')
+  assert.equal(key(final),false)
+  await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  assert.equal(key(input),true);await tick()
+  const prepare=f.requests.find(r=>r[1].endsWith('prepare'))
+  assert.equal(prepare[2].input.user_input,'first paragraph\n\nsecond paragraph')
 })
 
 test('discussion, correction and final remain distinct and only final is copied',async()=>{
@@ -215,12 +242,14 @@ test('discussion, correction and final remain distinct and only final is copied'
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   typeMessage(f,'edited draft');review(f);await tick()
   const controller=f.contributions[0].render().props.controller
-  const finish=(reply,candidate)=>{const identity=controller.getState().job.identity;controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:reply,candidate_prompt:candidate,reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)}
+  const finish=(reply,candidate,reported_route={provider:null,model:null})=>{const identity=controller.getState().job.identity;controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:reply,candidate_prompt:candidate,reported_route,usage:null,cost:null},error:null}},identity)}
   const first=f.requests.find(r=>r[1].endsWith('prepare'))[2].input;assert.equal(first.original_draft,'');assert.equal(first.user_input,'edited draft');assert.equal(JSON.stringify(first).includes('original private draft'),false)
   finish('Working draft one. What format?',null);let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft one. What format?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
-  typeMessage(f,'Use a table');review(f);await tick();const second=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)[2].input;assert.deepEqual(plain(second.turns),[{role:'user',text:'edited draft'},{role:'assistant',text:'Working draft one. What format?'}]);finish('Working draft two. Anything else?',null)
+  typeMessage(f,'Use a table');review(f);await tick();const second=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)[2].input;assert.deepEqual(plain(second.turns),[{role:'user',text:'edited draft'},{role:'assistant',text:'Working draft one. What format?'}]);finish('Working draft two. Anything else?',null,{provider:'review-provider',model:'review-model'})
   all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft two. Anything else?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
+  assert.ok(all.some(n=>n.props?.children==='Reported by Hermes: review-provider / review-model'))
   typeMessage(f,'Approved');review(f);await tick();finish('Final wording\nReady.','Final wording');all=nodes(f.render())
+  assert.equal(all.some(n=>typeof n.props?.children==='string' && n.props.children.startsWith('Reported by Hermes:')),false)
   assert.ok(all.some(n=>Array.isArray(n.props?.children) && n.props.children[0]==='Final prompt'));assert.ok(all.some(n=>n.props?.children==='Ready.'));assert.equal(all.filter(n=>n.props?.children==='Final wording').length,0)
   const oldCopy=all.find(n=>n.props?.children==='Copy prompt');oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording'])
   typeMessage(f,'Change the tone');review(f);await tick();finish('New working draft. Is this tone right?',null);all=nodes(f.render());assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false);assert.ok(all.some(n=>n.props?.children==='New working draft. Is this tone right?'));oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording']);assert.deepEqual(f.composerWrites,[])
@@ -261,8 +290,8 @@ test('stale send handlers cannot send newer input or a changed route',async()=>{
   f.setRequest(async(r,m)=>m.endsWith('describe')?{ok:true,data:desc}:{ok:false,error:{code:'busy',message:'The refiner has no available request slot.'}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'first')
   const oldInputSend=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send');typeMessage(f,'newer');oldInputSend.props.onClick();await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
-  const oldRouteSend=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send'),controller=f.contributions[0].render().props.controller
-  desc={...description,configured_route:{provider:'new',model:'route'}};await controller.refreshRoute();oldRouteSend.props.onClick();await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  const oldRouteSend=nodes(f.render()).find(n=>n.props?.['aria-label']==='Send'),oldRouteInput=messageInput(f),controller=f.contributions[0].render().props.controller
+  desc={...description,configured_route:{provider:'new',model:'route'}};await controller.refreshRoute();oldRouteSend.props.onClick();key(oldRouteInput);await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
   review(f);await tick();assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,1)
 })
 
@@ -276,7 +305,7 @@ test('failed prepare is visible and retries only on a new rendered send',async()
 
 test('production pane exposes one composer and no review dialog',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  let all=nodes(f.render());const inputs=all.filter(n=>n.type?.name==='Textarea')
+  let all=nodes(f.render());const inputs=all.filter(n=>n.type==='textarea' || n.type?.name==='Textarea')
   assert.equal(inputs.length,1);assert.equal(inputs[0].props.placeholder,'Message the refiner…')
   assert.equal(all.some(n=>n.props?.children==='Prepare preview'),false)
   assert.equal(all.some(n=>n.props?.children==='Review request'),false)
@@ -320,9 +349,14 @@ test('revoked catalog capability fences stale handlers and unmounts controls',as
 
 test('unsupported controls are disabled and resize works by keyboard and pointer',async()=>{
   const f=await load();f.setRequest(async()=>({ok:true,data:{...description,execution_support:{model_override:false,reasoning_effort:false}}}));f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  let all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true);assert.equal(all.some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
-  let grip=all.find(n=>n.props?.['aria-label']==='Resize message input');grip.props.onKeyDown({key:'ArrowUp',preventDefault(){}});grip=nodes(f.render()).find(n=>n.props?.['aria-label']==='Resize message input');assert.equal(grip.props['aria-valuenow'],48)
-  grip.props.onPointerDown({button:0,pointerId:1,clientY:100,currentTarget:{setPointerCapture(){}},preventDefault(){}});grip.props.onPointerMove({pointerId:1,clientY:70});grip=nodes(f.render()).find(n=>n.props?.['aria-label']==='Resize message input');assert.equal(grip.props['aria-valuenow'],78)
+  const all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true);assert.equal(all.some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
+  const grip=()=>nodes(f.render()).find(n=>n.props?.['aria-label']==='Resize message input').props
+  f.enableEffects();let height=28
+  const el={getBoundingClientRect:()=>({height})};messageInput(f).props.ref.current=el;f.flushEffects()
+  grip().onKeyDown({key:'ArrowUp',preventDefault(){}});assert.equal(messageInput(f).props.style['--pr-input-height'],'48px')
+  height=48;el.measure()
+  grip().onPointerDown({button:0,pointerId:1,clientY:100,currentTarget:{setPointerCapture(){}},preventDefault(){}});grip().onPointerMove({pointerId:1,clientY:70})
+  assert.equal(messageInput(f).props.style['--pr-input-height'],'78px')
 })
 
 test('native pane is docked beside chat and revealed only by the action',async()=>{
@@ -422,33 +456,49 @@ test('warmed stored capture initiates draft read synchronously before route reva
   assert.ok(events.includes('routes'));assert.equal(f.requests.length,1)
 })
 
+test('opening the pane cannot redirect draft capture to a different focused chat',async()=>{
+  const f=await load(), reads=[]
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async id=>{reads.push(id);return 'draft'})
+  const open=f.host.openWorkspace
+  f.host.openWorkspace=(...args)=>{f.state.focusedStoredSessionId.set('other');f.state.focusedSessionId.set('other-runtime');return open(...args)}
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  assert.deepEqual(reads,[]);assert.equal(f.requests.length,0)
+  assert.ok(nodes(f.render()).some(n=>n.props?.role==='alert' && n.props.children.includes('Click Refine')))
+})
 
-test('cold action refuses draft and offers retry after metadata failure',async()=>{
-  const f=await load(), wait=deferred();let reads=0
-  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return Promise.resolve('secret')});f.setRoutes(()=>wait.promise)
+test('cold Refine stays the only action and never queues capture on retry',async()=>{
+  const f=await load(), wait=deferred(), retry=deferred(), reads=[];let routeCalls=0
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(id=>{reads.push(id);return Promise.resolve('secret')});f.setRoutes(()=>{routeCalls++;return wait.promise})
   f.mod.namespace.default.register(f.ctx)
-  assert.equal(actionButton(f).props.disabled,true);actionButton(f).props.onClick();assert.equal(reads,0)
+  assert.deepEqual(actionNodes(f).filter(n=>n.props?.onClick).map(n=>n.props.children),['Refine'])
+  assert.notEqual(actionButton(f).props.disabled,true)
+  actionButton(f).props.onClick();actionButton(f).props.onClick();await tick()
+  assert.equal(routeCalls,1);assert.deepEqual(reads,[])
   wait.resolve(null);await tick()
-  assert.equal(actionButton(f).props.disabled,true)
-  const retry=actionNodes(f).find(n=>n.props?.children==='Retry routes');assert.ok(retry)
-  f.setRoutes(async()=>[f.route]);retry.props.onClick();await tick()
-  assert.equal(actionButton(f).props.disabled,false);actionButton(f).props.onClick();await tick();await tick();assert.equal(reads,1)
+  f.setRoutes(()=>{routeCalls++;return retry.promise})
+  assert.notEqual(actionButton(f).props.disabled,true);actionButton(f).props.onClick()
+  f.state.focusedStoredSessionId.set('other');f.state.focusedSessionId.set('other-runtime');retry.resolve([f.route]);await tick()
+  assert.equal(routeCalls,2);assert.deepEqual(reads,[]);assert.equal(f.workspaces.length,0);assert.equal(f.requests.length,0)
+  assert.ok(f.notices.some(n=>n.message.includes('Refine again')))
+  actionButton(f).props.onClick();assert.deepEqual(reads,['other']);await tick()
+  assert.equal(f.workspaces.length,1)
 })
 
 test('epoch change during prewarm discards metadata and retry uses new epoch',async()=>{
   const f=await load(), wait=deferred();let reads=0
   f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return Promise.resolve('secret')});f.setRoutes(()=>wait.promise)
   f.mod.namespace.default.register(f.ctx);f.setEpoch(2);wait.resolve([f.route]);await tick()
-  assert.equal(actionButton(f).props.disabled,true);assert.equal(reads,0)
-  f.setRoutes(async()=>[f.route]);actionNodes(f).find(n=>n.props?.children==='Retry routes').props.onClick();await tick()
-  assert.equal(actionButton(f).props.disabled,false);actionButton(f).props.onClick();await tick();await tick();assert.equal(reads,1)
+  assert.notEqual(actionButton(f).props.disabled,true);assert.equal(reads,0)
+  f.setRoutes(async()=>[f.route]);actionButton(f).props.onClick();await tick()
+  assert.equal(reads,0);assert.equal(f.workspaces.length,0)
+  actionButton(f).props.onClick();await tick();await tick();assert.equal(reads,1)
 })
 
 test('stale epoch and absent owner refuse before stored draft read',async()=>{
   const f=await load();let reads=0
   f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return Promise.resolve('secret')})
   f.mod.namespace.default.register(f.ctx);await tick();const old=actionButton(f);f.setEpoch(2)
-  assert.equal(actionButton(f).props.disabled,true);old.props.onClick();assert.equal(reads,0);await tick()
+  old.props.onClick();assert.equal(reads,0);assert.equal(f.workspaces.length,0);await tick()
   f.state.focusedSessionOwner.set(null);actionButton(f).props.onClick();await tick();assert.equal(reads,0);assert.equal(f.requests.length,0)
 })
 
@@ -463,7 +513,7 @@ test('dispose suppresses pending prewarm completion',async()=>{
   const f=await load(), wait=deferred();let reads=0
   f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return Promise.resolve('secret')});f.setRoutes(()=>wait.promise)
   f.mod.namespace.default.register(f.ctx);f.disposers[0]();wait.resolve([f.route]);await tick()
-  assert.equal(actionButton(f).props.disabled,true);actionButton(f).props.onClick();await tick();assert.equal(reads,0);assert.equal(f.requests.length,0)
+  actionButton(f).props.onClick();await tick();assert.equal(reads,0);assert.equal(f.requests.length,0);assert.equal(f.workspaces.length,0)
 })
 
 for (const change of ['draft','history','files']) {
@@ -741,17 +791,23 @@ test('image selection renders a removable thumbnail',async()=>{
 })
 
 
-test('captured multiline grows and manual size resets only on completed send',async()=>{
+test('resize grip reports measured height and manual size resets on completed send',async()=>{
   const f=await load();f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async()=> 'one\ntwo\nthree')
   f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();f.enableEffects()
-  let all=nodes(f.render()),input=all.find(n=>n.props?.['aria-label']==='Message the refiner');input.props.ref.current={style:{},scrollHeight:80};f.flushEffects()
-  assert.equal(input.props.ref.current.style.height,'80px')
-  all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Resize message input').props['aria-valuenow'],80)
-  all.find(n=>n.props?.['aria-label']==='Resize message input').props.onKeyDown({key:'End',preventDefault(){}});typeMessage(f,'edited');f.flushEffects();all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Resize message input').props['aria-valuenow'],160)
+  const grip=()=>nodes(f.render()).find(n=>n.props?.['aria-label']==='Resize message input').props
+  let measuredHeight=80
+  const input=messageInput(f),element={getBoundingClientRect:()=>({height:measuredHeight})}
+  assert.equal(input.props.value,'one\ntwo\nthree')
+  input.props.ref.current=element;f.flushEffects()
+  assert.equal(grip()['aria-valuenow'],80)
+  grip().onKeyDown({key:'End',preventDefault(){}});typeMessage(f,'edited');f.flushEffects()
+  assert.equal(messageInput(f).props.style['--pr-input-height'],'160px')
+  measuredHeight=160;element.measure();assert.equal(grip()['aria-valuenow'],160)
   const controller=f.contributions[0].render().props.controller;await controller.prepare();await controller.send();const identity=controller.getState().job.identity
   controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:'done',candidate_prompt:null,reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
-  input.props.ref.current.scrollHeight=28;f.render();f.flushEffects();all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Resize message input').props['aria-valuenow'],28)
+  f.render();f.flushEffects();assert.equal(messageInput(f).props.style['--pr-input-height'],'28px')
+  measuredHeight=28;element.measure();assert.equal(grip()['aria-valuenow'],28)
 })
 
 

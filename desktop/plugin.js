@@ -89,18 +89,18 @@ export function createController(dependencies) {
       return emit({routeInfo:data, routeState:data.configured_route ? 'ready' : 'unconfigured', routeError:null, execution, prepared:changed || !sameExecution(execution,state.execution) ? null : state.prepared, error:(execution.model_override || data.configured_route) ? null : 'Configure the independent refiner provider and model.'})
     } catch (error) { if (live(g) && routeRequest === routeGeneration) { const text = error?.code === -32601 ? errors.incompatible_api : 'Route unavailable. Reopen from the intended chat.'; return emit({routeInfo:null,routeState:error?.code === -32601 ? 'missing' : 'failed',routeError:text,prepared:null,error:text}) } return state }
   }
-  async function open() {
+  async function open(source) {
     if (disposed || state.opening) return state
     if (state.origin) return state
     const g = ++generation
     emit({opening:true, error:null})
     try {
-      const origin = await captureOrigin()
+      const origin = await captureOrigin(source)
       if (!live(g)) return state
-      if (!origin?.route || typeof origin.draft !== 'string') return emit({opening:false, error:'Unable to capture the chat owner and draft. Reopen from the intended chat.'})
+      if (!origin?.route || typeof origin.draft !== 'string') return emit({opening:false, error:'Could not read this chat’s draft. Click Refine to try again.'})
       emit({origin, draft:'', userInput:origin.draft, refinementId:newId(), opening:false})
       return await refreshRoute()
-    } catch { if (live(g)) return emit({opening:false, error:'Unable to capture the chat owner and draft. Reopen from the intended chat.'}); return state }
+    } catch { if (live(g)) return emit({opening:false, error:'Could not read this chat’s draft. Click Refine to try again.'}); return state }
   }
   function setInput(values) {
     if (state.job && Object.hasOwn(values, 'userInput')) return state
@@ -188,7 +188,8 @@ export function createController(dependencies) {
     cleanJob(job)
     if (data.state !== 'succeeded') return emit({job:null, message:null, error:data.state === 'failed' ? errorText({error:data.error}) : 'The request did not return a usable result.'})
     const result = data.result, turns = [...state.turns, {role:'user',text:job.submittedInput}, {role:'assistant',text:result.assistant_reply}]
-    const patch = {job:null, turns, userInput:state.userInput === job.capturedInput ? '' : state.userInput, message:null, reportedRoute:result.reported_route, error:null, prepared:null, finalDedup:result.candidate_prompt === null ? null : {index:turns.length - 1, text:result.candidate_prompt}}
+    const reportedRoute = result.reported_route.provider || result.reported_route.model ? result.reported_route : null
+    const patch = {job:null, turns, userInput:state.userInput === job.capturedInput ? '' : state.userInput, message:null, reportedRoute, error:null, prepared:null, finalDedup:result.candidate_prompt === null ? null : {index:turns.length - 1, text:result.candidate_prompt}}
     if (result.candidate_prompt !== null) {
       if (job.candidateRevision === state.candidateRevision && job.identity.input_revision === state.revision) { patch.candidate = result.candidate_prompt; patch.proposal = null }
       else patch.proposal = result.candidate_prompt
@@ -212,9 +213,9 @@ function snapshot() {
   return {owner:owner && {connectionId:owner.connectionId, profile:owner.profile}, storedId:host.state.focusedStoredSessionId.get(), runtimeId:host.state.focusedSessionId.get(), epoch:gatewayActivationEpoch()}
 }
 function sameSnapshot(a,b) { return a.owner?.connectionId === b.owner?.connectionId && a.owner?.profile === b.owner?.profile && a.storedId === b.storedId && a.runtimeId === b.runtimeId && a.epoch === b.epoch }
-async function captureOrigin(metadata, refreshMetadata) {
-  const before = snapshot(), cached = metadata.get()
-  if (!cached.routes || cached.epoch !== before.epoch) { void refreshMetadata(); throw new Error('capture') }
+async function captureOrigin(before, cached, refreshMetadata) {
+  if (!sameSnapshot(before,snapshot())) throw new Error('capture')
+  if (!cached || cached.epoch !== before.epoch) { void refreshMetadata(); throw new Error('capture') }
   if (!before.owner?.connectionId || !before.owner?.profile || (!before.storedId && before.runtimeId)) throw new Error('capture')
   const matching = cached.routes.filter(r => r.connectionId === before.owner.connectionId && r.profile === before.owner.profile && r.targetProfile)
   if (matching.length !== 1) { void refreshMetadata(); throw new Error('capture') }
@@ -297,9 +298,10 @@ function Panel({controller, store, ctx}) {
   const [addOpen, setAddOpen] = useState(false)
   const [modelOpen, setModelOpen] = useState(false)
   const [inputHeight, setInputHeight] = useState(28)
+  const [manualHeight, setManualHeight] = useState(28)
   const inputRef = useRef(null)
+  const composing = useRef(null)
   const drag = useRef(null)
-  const manualHeight = useRef(28)
   const owner = s.origin?.route, refinementId = s.refinementId
   const job = s.job?.handle ? s.job : null
   const status = useQuery({
@@ -308,16 +310,17 @@ function Panel({controller, store, ctx}) {
     enabled:!!job, refetchInterval:3000, retry:false
   })
   useEffect(() => { if (job && status.data) controller.acceptStatus(status.data, job.identity) }, [status.data, job?.identity.request_id])
-  useEffect(() => { setHistory([]); setCursor(null); setHistoryError(null); setFolder(null); setPath(''); setEntries([]); setDialog(null); setAddOpen(false); setModelOpen(false); manualHeight.current=28; setInputHeight(28) }, [s.refinementId])
-  useEffect(() => { manualHeight.current=28; setInputHeight(28) }, [s.turns.length])
+  useEffect(() => { setHistory([]); setCursor(null); setHistoryError(null); setFolder(null); setPath(''); setEntries([]); setDialog(null); setAddOpen(false); setModelOpen(false); drag.current=null }, [refinementId])
+  useEffect(() => { setManualHeight(28) }, [refinementId,s.turns.length])
   useEffect(() => {
-    const el=inputRef.current
+    const el = inputRef.current
     if (!el) return
-    el.style.height='28px'
-    const height=Math.max(manualHeight.current,Math.min(160,el.scrollHeight))
-    el.style.height=`${height}px`
-    setInputHeight(height)
-  }, [s.userInput,s.refinementId,s.turns.length])
+    const measure = () => { const height = Math.round(el.getBoundingClientRect().height); if (height) setInputHeight(height) }
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    measure()
+    return () => observer.disconnect()
+  }, [refinementId])
   async function loadHistory(earlier) {
     const current = controller.getState(), id = current.refinementId
     if (current.refinementId !== refinementId || !current.origin?.storedId) return
@@ -373,12 +376,22 @@ function Panel({controller, store, ctx}) {
     } catch { if (controller.getState().refinementId === id) setFileError('File unavailable, unsafe, too large or unsupported. Reselect files.') }
   }
   const button = (label, onClick, disabled = false) => jsx(Button,{type:'button',variant:'secondary',onClick,disabled,children:label})
-  const field = (label, value, onChange, disabled = false) => jsxs('label',{className:'flex flex-col gap-1',children:[label,jsx(Textarea,{value,onChange:e => onChange(e.target.value),disabled})]})
+  const field = (label, value, onChange, disabled = false) => jsxs('label',{className:'flex flex-col gap-1',children:[label,jsx(Textarea,{className:'pr-prose',value,onChange:e => onChange(e.target.value),disabled})]})
+  const prose = text => jsx('div',{className:'pr-prose',children:text})
   if (!s.origin) return jsx('div',{className:'flex h-full min-h-0 flex-col text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:jsxs('main',{className:'grid min-h-0 flex-1 place-items-center p-4 text-(--ui-text-tertiary)',children:[jsx('div',{className:'text-base',children:'Refine your prompt'}),s.error && jsx('p',{role:'alert',children:s.error})]})})
   const route = s.routeInfo ? s.execution.model_override || s.routeInfo.configured_route : null
   const support = s.routeInfo?.execution_support
   const sameDiscussion = current => current.refinementId === refinementId && !!current.origin && sameRoute(current.origin.route,owner)
   const canEdit = current => sameDiscussion(current) && !current.job
+  const submit = () => {
+    const current = controller.getState()
+    if (canEdit(current) && current.userInput.trim() && current.revision === s.revision && current.routeState === s.routeState && JSON.stringify(current.routeInfo) === JSON.stringify(s.routeInfo) && sameExecution(current.execution,s.execution)) void controller.send()
+  }
+  const sendOnEnter = e => {
+    if (e.defaultPrevented || e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || composing.current === refinementId || e.nativeEvent?.isComposing || e.nativeEvent?.keyCode === 229) return
+    e.preventDefault()
+    if (!e.repeat) submit()
+  }
   const canUseModelMenu = current => sdk.MODEL_CATALOG_CAPABILITIES?.selectionOnly === true && canEdit(current)
   const menuController = {
     allowSpeed:false,
@@ -388,7 +401,7 @@ function Panel({controller, store, ctx}) {
     applyPreset:()=>{},
     setOptions:()=>{}
   }
-  const resize = value => { const height = Math.max(28,Math.min(160,value)); manualHeight.current = height; setInputHeight(height) }
+  const resize = value => setManualHeight(Math.max(28,Math.min(160,value)))
   const chevron = jsx('svg',{viewBox:'0 0 12 12','aria-hidden':true,children:jsx('path',{d:'m3 4.5 3 3 3-3'})})
   const menu = jsxs('div',{className:'pr-route-controls',children:[
     jsx(DropdownMenu,{open:modelOpen && canUseModelMenu(s),onOpenChange:open=>{if (!open || canUseModelMenu(controller.getState())) setModelOpen(open)},children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsxs('button',{type:'button',className:'pr-route-pill',disabled:!canUseModelMenu(s) || (!support?.model_override && !s.execution.model_override),'aria-label':'Refiner model for this conversation',title:'Only this conversation',children:[jsx('span',{children:route?.model || 'Model unavailable'}),chevron]})}),modelOpen && canUseModelMenu(s) && jsx(DropdownMenuContent,{align:'end',className:'w-72 p-0',children:jsxs(ModelMenuCloseContext.Provider,{value:()=>setModelOpen(false),children:[jsx(DropdownMenuItem,{onSelect:()=>{const current=controller.getState();if(canUseModelMenu(current)) controller.setExecution({model_override:null})},children:'Use configured refiner'}),jsx(ModelCatalogMenu,{selectionOnly:true,controller:menuController,request:async(method,params)=>{if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');if(!canUseModelMenu(controller.getState())) throw new Error('model catalog unavailable');const result=await routed(owner,method,params);if(!sameDiscussion(controller.getState())) throw new Error('discussion ended');if(!canUseModelMenu(controller.getState())) throw new Error('model catalog unavailable');return result},ownerConnectionId:owner.connectionId,profile:owner.targetProfile})]})})]})})
@@ -396,12 +409,51 @@ function Panel({controller, store, ctx}) {
   const contextDialog = jsxs('div',{className:'space-y-2',children:[jsx('p',{children:'Stored display projection may be incomplete or truncated. Compaction and tool rows cannot be selected. Attachments are not fetched.'}),s.origin.storedId ? button('Refresh history',()=>void loadHistory(false)) : jsx('p',{children:'No stored chat is available.'}),cursor && button('Load earlier',()=>void loadHistory(true)),historyError && jsx('p',{role:'alert',children:historyError}),...history.map(row=>jsxs('div',{className:'my-2',children:[row.row_kind === 'message' && ['user','assistant'].includes(row.role) && typeof row.text === 'string' ? jsx(Checkbox,{checked:s.selection.some(m=>m.id===row.localId),onCheckedChange:value=>selectHistory(row,value === true),'aria-label':`Select ${row.role} message`}) : null,jsx('span',{children:` ${row.role || row.row_kind}${row.truncated ? ' (truncated)' : ''}`}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:typeof row.text === 'string' ? row.text : '[non-selectable entry]'})]},row.localId))]})
   const fileDialog = jsxs('div',{className:'space-y-2',children:[jsx('p',{children:'Folder access persists until revoked in Capabilities → Plugins → Folder access. Only selected files are read. PDF and Office files are not supported.'}),button('Choose folder',()=>void openFolder()),fileError && jsx('p',{role:'alert',children:fileError}),folder && jsxs('div',{children:[jsx('p',{children:`${folder.name}${path ? ` / ${path}` : ''}`}),path && button('Up',()=>void listFolder(folder,path.split('/').slice(0,-1).join('/'),s.refinementId)),...entries.filter(entry=>entry.isDirectory || (dialog === 'Images' ? !!imageExtensions[entry.name.split('.').pop().toLowerCase()] : !imageExtensions[entry.name.split('.').pop().toLowerCase()])).map(entry=>button(entry.isDirectory ? `${entry.name}/` : `Add ${entry.name}`,()=>entry.isDirectory ? void listFolder(folder,entry.path,s.refinementId) : void addFile(entry)))]})]})
 
-  return jsxs('div',{className:'flex h-full min-h-0 flex-col overflow-hidden text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:[jsx('style',{children:`.pr-composer{container-type:inline-size}.pr-box{background:var(--composer-fill)}.pr-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto 28px;align-items:center;gap:6px}.pr-route-controls{display:flex;align-items:center;min-width:0;gap:4px}.pr-route-pill{display:flex;align-items:center;gap:4px;height:var(--composer-control-size,1.5rem);min-width:0;max-width:180px;padding:0 8px;border:0;border-radius:6px;background:transparent;font-family:inherit;font-size:var(--text-sm,.875rem);line-height:var(--text-sm--line-height,1.25rem);font-weight:400;color:var(--ui-text-tertiary);white-space:nowrap}.pr-route-pill:hover{background:var(--chrome-action-hover)}.pr-route-pill span{overflow:hidden;text-overflow:ellipsis}.pr-route-pill svg{width:10px;height:10px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}.pr-input{display:block;width:100%;min-width:0;margin:0;padding:6px 0 2px;border:0;outline:none;background:transparent;box-shadow:none;resize:none;overflow-y:auto;line-height:20px;font-size:14px}.pr-send{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:var(--dt-foreground);color:var(--dt-background);line-height:0}.pr-send svg{display:block;padding:0}.pr-add{display:grid;place-items:center;width:24px;height:28px;padding:0;border:0;background:transparent}.pr-grip{position:absolute;left:50%;top:-7px;z-index:1;width:48px;height:12px;transform:translateX(-50%);padding:0;border:0;background:transparent;cursor:ns-resize;touch-action:none}.pr-chip{display:flex;align-items:center;gap:6px;max-width:230px;min-width:0}.pr-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pr-thumb{width:32px;height:32px;object-fit:cover;flex:none}@container(max-width:440px){.pr-row{grid-template-columns:24px minmax(0,1fr) 28px}.pr-route-controls{grid-column:2;grid-row:2}.pr-send{grid-column:3;grid-row:1}}`}),
+  return jsxs('div',{className:'pr-pane flex h-full min-h-0 flex-col overflow-hidden text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:[jsx('style',{children:`
+    .pr-pane{container:pr-pane / inline-size;min-width:0;--pr-type-adjust:min(0rem,1.5cqi - .5rem);--pr-prose-size:calc(var(--conversation-text-base-size,.8125rem) * var(--chat-text-scale,1));--pr-notice-size:var(--text-xs,.75rem);--pr-model-size:var(--text-sm,.875rem)}
+    .pr-notice{font-size:clamp(min(.6875rem,var(--pr-notice-size)),var(--pr-notice-size) + var(--pr-type-adjust),var(--pr-notice-size))}
+    .pr-box{background:var(--composer-fill);border-color:var(--ui-stroke-secondary)}
+    .pr-box:has(.pr-input:focus-visible){border-color:var(--dt-composer-ring)}
+    @media(forced-colors:active){.pr-box:has(.pr-input:focus-visible){outline:2px solid Highlight;outline-offset:2px}}
+    .pr-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto 28px;align-items:center;gap:6px}
+    .pr-route-controls{display:flex;align-items:center;min-width:0;gap:4px}
+    .pr-route-controls > div{min-width:0}
+    .pr-route-pill{display:flex;align-items:center;gap:4px;height:var(--composer-control-size,1.5rem);min-width:0;max-width:min(100%,180px);padding:0 8px;border:0;border-radius:6px;background:transparent;font-family:inherit;font-size:clamp(min(.75rem,var(--pr-model-size)),var(--pr-model-size) + var(--pr-type-adjust),var(--pr-model-size));line-height:var(--text-sm--line-height,1.25rem);font-weight:400;color:var(--ui-text-tertiary);white-space:nowrap}
+    .pr-route-pill:hover{background:var(--chrome-action-hover)}
+    .pr-route-pill span{overflow:hidden;text-overflow:ellipsis}
+    .pr-route-pill svg{width:10px;height:10px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5}
+    .pr-prose{font-family:var(--dt-font-sans);font-size:clamp(min(.75rem,var(--pr-prose-size)),var(--pr-prose-size) + var(--pr-type-adjust),var(--pr-prose-size));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+    .pr-input{display:block;box-sizing:border-box;field-sizing:content;width:100%;min-width:0;min-height:var(--pr-input-height);max-height:160px;margin:0;padding:max(.25rem,calc((28px - 1lh) / 2)) 0;border:0;outline:none;background:transparent;resize:none;overflow-y:auto;color:var(--ui-text-primary)}
+    .pr-input:placeholder-shown{height:max(var(--pr-input-height),calc(1lh + .5rem))}
+    .pr-input::placeholder{color:var(--ui-text-tertiary);opacity:1;white-space:nowrap;text-overflow:ellipsis}
+    .pr-send{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:var(--dt-primary);color:var(--dt-primary-foreground);line-height:0}
+    .pr-send:enabled:hover{background:color-mix(in srgb,var(--dt-primary) 90%,transparent)}
+    .pr-send:disabled{background:color-mix(in srgb,var(--dt-primary) 30%,transparent);color:var(--dt-foreground)}
+    .pr-send svg{display:block;padding:0}
+    .pr-add{display:grid;place-items:center;width:24px;height:28px;padding:0;border:0;background:transparent}
+    .pr-grip{position:absolute;left:50%;top:-7px;z-index:1;width:48px;height:12px;transform:translateX(-50%);padding:0;border:0;background:transparent;cursor:ns-resize;touch-action:none}
+    .pr-chip{display:flex;align-items:center;gap:6px;max-width:230px;min-width:0}
+    .pr-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .pr-thumb{width:32px;height:32px;object-fit:cover;flex:none}
+    @container pr-pane (inline-size <= 29rem){
+      .pr-main{padding:.625rem .75rem;overflow-wrap:anywhere}
+      .pr-composer{padding:.5rem .375rem}
+      .pr-notice{line-height:1.4}
+      .pr-box{padding:.375rem}
+      .pr-row{grid-template-columns:24px minmax(0,1fr) 28px;gap:2px 4px}
+      .pr-input{min-height:max(var(--pr-input-height),min(160px,2lh + .5rem));padding-block:.25rem;align-content:safe center}
+      .pr-route-controls{grid-column:2 / -1;grid-row:2}
+      .pr-route-pill{max-width:100%}
+      .pr-send{grid-column:3;grid-row:1}
+    }
+    `}),
     jsx('header',{style:{display:'flex',justifyContent:'flex-end',padding:'4px 8px',borderBottom:'1px solid var(--ui-stroke-secondary)'},children:jsx(Button,{type:'button',variant:'ghost',size:'icon-xs','aria-label':'Discard refinement',title:'Discard refinement',onClick:()=>{if(sameDiscussion(controller.getState()))controller.discard()},children:jsx(sdk.Codicon,{name:'trash'})})}),
-    jsxs('main',{className:'min-h-0 flex-1 overflow-auto p-4',children:[!s.turns.length && !s.candidate && jsx('div',{className:'grid h-full place-items-center text-base text-(--ui-text-tertiary)',children:'Refine your prompt'}),...s.turns.map((turn,i)=>jsxs('div',{className:'mb-4',children:[jsx('strong',{children:turn.role === 'user' ? 'You' : 'Refiner'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:s.finalDedup?.index === i && (s.candidate === s.finalDedup.text || s.proposal === s.finalDedup.text) ? turn.text.replace(s.finalDedup.text,'').trim() : turn.text})]},i)),s.reportedRoute && jsx('p',{className:'text-xs text-(--ui-text-tertiary)',children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),s.candidate && jsxs('div',{className:'mt-4 space-y-2',children:[field('Final prompt',s.candidate,v=>{if(sameDiscussion(controller.getState()))controller.editCandidate(v)}),button('Copy prompt',()=>{const current=controller.getState();if(sameDiscussion(current) && current.candidate === s.candidate)void controller.copy()})]}),s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),jsx('pre',{className:'whitespace-pre-wrap break-words',children:s.proposal}),button('Apply proposal',()=>{if(sameDiscussion(controller.getState()))controller.applyProposal()})]}),status.isError && jsx('p',{role:'alert',children:'Status unavailable. The request may still be running.'}),s.message && jsx('p',{children:s.message}),s.error && jsx('p',{role:'alert',children:s.error})]}),
-    jsxs('div',{className:'p-3 pr-composer',children:[jsx('p',{className:'mb-2 text-xs text-(--ui-text-tertiary)',children:s.files.some(file=>file.kind === 'image') ? `${sendNotice} Images are not redacted.` : sendNotice}),(s.routeState !== 'ready' || s.error) && button('Refresh route',()=>{if(canEdit(controller.getState()))void controller.refreshRoute()}),jsxs('div',{className:'relative rounded-md border border-(--ui-stroke-secondary) p-2 pr-box',children:[jsx('button',{type:'button',role:'separator','aria-label':'Resize message input','aria-orientation':'horizontal','aria-valuemin':28,'aria-valuemax':160,'aria-valuenow':inputHeight,className:'pr-grip',onPointerDown:e=>{if(e.button!==0)return;drag.current={pointer:e.pointerId,y:e.clientY,height:inputHeight};e.currentTarget.setPointerCapture(e.pointerId);e.preventDefault()},onPointerMove:e=>{if(drag.current?.pointer===e.pointerId)resize(drag.current.height+drag.current.y-e.clientY)},onPointerUp:()=>{drag.current=null},onPointerCancel:()=>{drag.current=null},onLostPointerCapture:()=>{drag.current=null},onKeyDown:e=>{if(!['ArrowUp','ArrowDown','Home','End'].includes(e.key))return;e.preventDefault();resize(e.key==='Home'?28:e.key==='End'?160:inputHeight+(e.key==='ArrowUp'?20:-20))},children:jsx('span',{style:{display:'block',width:'26px',height:'2px',margin:'auto',borderRadius:'2px',background:'var(--ui-stroke-secondary)'}})}),
+    jsxs('main',{className:'pr-main min-h-0 flex-1 overflow-auto p-4',children:[!s.turns.length && !s.candidate && jsx('div',{className:'grid h-full place-items-center text-base text-(--ui-text-tertiary)',children:'Refine your prompt'}),...s.turns.map((turn,i)=>jsxs('div',{className:'mb-4',children:[jsx('strong',{children:turn.role === 'user' ? 'You' : 'Refiner'}),prose(s.finalDedup?.index === i && (s.candidate === s.finalDedup.text || s.proposal === s.finalDedup.text) ? turn.text.replace(s.finalDedup.text,'').trim() : turn.text)]},i)),s.reportedRoute && jsx('p',{className:'text-xs text-(--ui-text-tertiary)',children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),s.candidate && jsxs('div',{className:'mt-4 space-y-2',children:[field('Final prompt',s.candidate,v=>{if(sameDiscussion(controller.getState()))controller.editCandidate(v)}),button('Copy prompt',()=>{const current=controller.getState();if(sameDiscussion(current) && current.candidate === s.candidate)void controller.copy()})]}),s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),prose(s.proposal),button('Apply proposal',()=>{if(sameDiscussion(controller.getState()))controller.applyProposal()})]}),status.isError && jsx('p',{role:'alert',children:'Status unavailable. The request may still be running.'}),s.message && jsx('p',{children:s.message}),s.error && jsx('p',{role:'alert',children:s.error})]}),
+    jsxs('div',{className:'p-3 pr-composer',children:[jsx('p',{className:'pr-notice mb-2 text-xs text-(--ui-text-tertiary)',children:s.files.some(file=>file.kind === 'image') ? `${sendNotice} Images are not redacted.` : sendNotice}),(s.routeState !== 'ready' || s.error) && button('Refresh route',()=>{if(canEdit(controller.getState()))void controller.refreshRoute()}),jsxs('div',{className:'relative rounded-md border border-(--ui-stroke-secondary) p-2 pr-box',children:[jsx('button',{type:'button',role:'separator','aria-label':'Resize message input','aria-orientation':'horizontal','aria-valuemin':28,'aria-valuemax':160,'aria-valuenow':inputHeight,className:'pr-grip',onPointerDown:e=>{if(e.button!==0)return;drag.current={pointer:e.pointerId,y:e.clientY,height:inputHeight};e.currentTarget.setPointerCapture(e.pointerId);e.preventDefault()},onPointerMove:e=>{if(drag.current?.pointer===e.pointerId)resize(drag.current.height+drag.current.y-e.clientY)},onPointerUp:()=>{drag.current=null},onPointerCancel:()=>{drag.current=null},onLostPointerCapture:()=>{drag.current=null},onKeyDown:e=>{if(!['ArrowUp','ArrowDown','Home','End'].includes(e.key))return;e.preventDefault();resize(e.key==='Home'?28:e.key==='End'?160:inputHeight+(e.key==='ArrowUp'?20:-20))},children:jsx('span',{style:{display:'block',width:'26px',height:'2px',margin:'auto',borderRadius:'2px',background:'var(--ui-stroke-secondary)'}})}),
       (s.selection.length > 0 || s.files.length > 0) && jsxs('div',{className:'mb-2 flex flex-wrap gap-2',children:[s.selection.length > 0 && jsxs('div',{className:'rounded border border-(--ui-stroke-secondary) p-2',children:[`${s.selection.length} chat messages `,button('Remove context',()=>{if(sameDiscussion(controller.getState()))void controller.setSelection({messages:[]})})]}),...s.files.map(f=>jsxs('div',{className:'pr-chip rounded border border-(--ui-stroke-secondary) p-2',children:[f.kind === 'image' && jsx('img',{className:'pr-thumb',src:`data:${f.mime};base64,${f.data_base64}`,alt:f.name}),jsx('span',{className:'pr-chip-name',children:f.name}),button(`Remove ${f.name}`,()=>{const current=controller.getState();if(sameDiscussion(current))void controller.setSelection({files:current.files.filter(item=>item.id!==f.id)})})]},f.id))]}),
-      jsxs('div',{className:'pr-row',children:[jsx(DropdownMenu,{open:addOpen,onOpenChange:setAddOpen,children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsx('button',{type:'button','aria-label':'Add context or attachments',className:'pr-add',children:'+'})}),addOpen && jsx(DropdownMenuContent,{children:['Chat context','Files','Images'].map(label=>jsx(DropdownMenuItem,{onSelect:()=>{if(!sameDiscussion(controller.getState()))return;setAddOpen(false);setDialog(label)},children:label},label))})]})}),jsx(Textarea,{ref:inputRef,rows:1,value:s.userInput,placeholder:'Message the refiner…','aria-label':'Message the refiner',disabled:!!s.job,className:'pr-input min-w-0 resize-none border-0 bg-transparent shadow-none',style:{height:`${inputHeight}px`,minHeight:'28px',maxHeight:'160px'},onChange:e=>{if(canEdit(controller.getState()))controller.setInput({userInput:e.target.value})}}),menu,jsx('button',{type:'button','aria-label':'Send',disabled:!!s.job,onClick:()=>{const current=controller.getState();if(canEdit(current) && current.revision === s.revision && current.routeState === s.routeState && JSON.stringify(current.routeInfo) === JSON.stringify(s.routeInfo) && sameExecution(current.execution,s.execution))void controller.send()},className:'pr-send',children:jsx('svg',{viewBox:'0 0 24 24',width:16,height:16,fill:'none',stroke:'currentColor',strokeWidth:1.5,strokeLinecap:'round',strokeLinejoin:'round',children:jsx('path',{d:'M12 20V4M5 11l7-7 7 7'})})})]})]})]}),
+      jsxs('div',{className:'pr-row',children:[jsx(DropdownMenu,{open:addOpen,onOpenChange:setAddOpen,children:jsxs('div',{children:[jsx(DropdownMenuTrigger,{asChild:true,children:jsx('button',{type:'button','aria-label':'Add context or attachments',className:'pr-add',children:'+'})}),addOpen && jsx(DropdownMenuContent,{children:['Chat context','Files','Images'].map(label=>jsx(DropdownMenuItem,{onSelect:()=>{if(!sameDiscussion(controller.getState()))return;setAddOpen(false);setDialog(label)},children:label},label))})]})}),
+      jsx('textarea',{ref:inputRef,rows:1,value:s.userInput,placeholder:'Message the refiner…','aria-label':'Message the refiner',disabled:!!s.job,className:'pr-input pr-prose',style:{'--pr-input-height':`${manualHeight}px`},onChange:e=>{if(canEdit(controller.getState()))controller.setInput({userInput:e.target.value})},onKeyDown:sendOnEnter,onCompositionStart:()=>{composing.current=refinementId},onCompositionEnd:()=>{composing.current=null},onBlur:()=>{composing.current=null}}),menu,
+      jsx('button',{type:'button','aria-label':'Send',disabled:!!s.job || !s.userInput.trim(),onClick:submit,className:'pr-send',children:jsx('svg',{viewBox:'0 0 24 24',width:16,height:16,fill:'none',stroke:'currentColor',strokeWidth:1.5,strokeLinecap:'round',strokeLinejoin:'round',children:jsx('path',{d:'M12 20V4M5 11l7-7 7 7'})})})]})]})]}),
     dialog && jsx(Dialog,{open:true,onOpenChange:open=>{if(!open)setDialog(null)},children:jsxs(DialogContent,{className:'max-h-[85vh] overflow-auto',children:[jsx(DialogTitle,{children:dialog}),dialog === 'Chat context' ? contextDialog : fileDialog,button('Done',()=>setDialog(null))]})})
   ]})
 }
@@ -410,24 +462,41 @@ export default {
   id:'prompt-refiner', name:'Prompt Refiner (Desktop)', defaultEnabled:false,
   description:'Adds a Refine button beside your draft. Discuss changes in a side pane and copy the version you want.',
   register(ctx) {
-    const store = atom(initial()), metadata = atom({epoch:null, routes:null, loading:false})
-    let disposed = false, metadataGeneration = 0, closeWorkspace = null
+    const store = atom(initial())
+    let disposed = false, metadata = null, pending = null, closeWorkspace = null
     async function refreshMetadata() {
       if (disposed) return
-      const epoch = gatewayActivationEpoch(), generation = ++metadataGeneration
-      metadata.set({epoch:null, routes:null, loading:true})
+      const epoch = gatewayActivationEpoch()
+      if (pending?.epoch === epoch) return
+      const refresh = {epoch}
+      pending = refresh
+      metadata = null
       try {
         const routes = await host.profileRoutes()
-        if (!disposed && generation === metadataGeneration) metadata.set(Array.isArray(routes) && epoch === gatewayActivationEpoch() ? {epoch, routes:snapshotValue(routes), loading:false} : {epoch:null, routes:null, loading:false})
-      } catch { if (!disposed && generation === metadataGeneration) metadata.set({epoch:null, routes:null, loading:false}) }
+        if (!disposed && pending === refresh && epoch === gatewayActivationEpoch() && Array.isArray(routes)) metadata = {epoch, routes:snapshotValue(routes)}
+      } catch {} finally { if (pending === refresh) pending = null }
     }
-    const controller = createController({captureOrigin:()=>captureOrigin(metadata,refreshMetadata), requestProfile:routed, readSelectedFile:item=>readFile(ctx,item), writeClipboard:text=>ctx.os.writeClipboard(text), queryClient, newId:()=>crypto.randomUUID(), publish:value=>store.set(value)})
+    const controller = createController({captureOrigin:source=>captureOrigin(source,metadata,refreshMetadata), requestProfile:routed, readSelectedFile:item=>readFile(ctx,item), writeClipboard:text=>ctx.os.writeClipboard(text), queryClient, newId:()=>crypto.randomUUID(), publish:value=>store.set(value)})
     function Action() {
-      const current = useValue(metadata), ready = !!current.routes && current.epoch === gatewayActivationEpoch()
-      return jsxs('div',{children:[jsx(Button,{type:'button',style:{padding:'.3125rem .625rem'},disabled:!ready,onClick:()=>{ if (disposed) return; if (!metadata.get().routes || metadata.get().epoch !== gatewayActivationEpoch()) { void refreshMetadata(); return } if (typeof host.openWorkspace !== 'function' || typeof host.revealPane !== 'function') { host.notify({kind:'error',message:'This Hermes Desktop cannot open the refiner pane.'}); return } if (closeWorkspace) host.revealPane('plugin-workspace:prompt-refiner'); else { try { closeWorkspace = host.openWorkspace('prompt-refiner',{title:'Prompt Refiner',dock:{pane:'workspace',pos:'right'},minWidth:'22rem',render:()=>jsx(Panel,{controller,store,ctx}),onClose:()=>{closeWorkspace=null}}) } catch { host.notify({kind:'error',message:'Could not open the refiner pane.'}); return } } void controller.open() },children:'Refine'}),!ready && jsx(Button,{type:'button',disabled:current.loading,onClick:()=>void refreshMetadata(),children:current.loading ? 'Loading routes…' : 'Retry routes'})]})
+      return jsx(Button,{type:'button',style:{padding:'.3125rem .625rem'},onClick:()=>{
+        if (disposed) return
+        const source = snapshot()
+        if (!controller.getState().origin && metadata?.epoch !== source.epoch) {
+          void refreshMetadata()
+          host.notify({kind:'info',message:'Refiner isn’t ready yet. Click Refine again in a moment.'})
+          return
+        }
+        if (typeof host.openWorkspace !== 'function' || typeof host.revealPane !== 'function') { host.notify({kind:'error',message:'This Hermes Desktop cannot open the refiner pane.'}); return }
+        if (closeWorkspace) host.revealPane('plugin-workspace:prompt-refiner')
+        else {
+          try { closeWorkspace = host.openWorkspace('prompt-refiner',{title:'Prompt Refiner',dock:{pane:'workspace',pos:'right'},minWidth:'22rem',render:()=>jsx(Panel,{controller,store,ctx}),onClose:()=>{closeWorkspace=null}}) }
+          catch { host.notify({kind:'error',message:'Could not open the refiner pane.'}); return }
+        }
+        void controller.open(source)
+      },children:'Refine'})
     }
     ctx.register({id:'refine',area:COMPOSER_AREAS.actions,render:()=>jsx(Action,{})})
-    ctx.onDispose(()=>{ disposed = true; metadataGeneration++; controller.dispose(); if (closeWorkspace) { const close=closeWorkspace; closeWorkspace=null; close() } })
+    ctx.onDispose(()=>{ disposed = true; metadata = null; pending = null; controller.dispose(); if (closeWorkspace) { const close=closeWorkspace; closeWorkspace=null; close() } })
     void refreshMetadata()
   }
 }
