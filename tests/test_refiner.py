@@ -86,6 +86,116 @@ class RefinerTests(unittest.TestCase):
             sys.modules.pop(spec.name, None)
             sys.modules.pop(spec.name + '.refiner', None)
 
+    def test_v2_golden_prepare_and_digest(self):
+        golden = {'input_revision': 2, 'expected_route': ROUTE, 'prepared': PREPARED, 'execution': {'model_override': None, 'reasoning_effort': 'high'}, 'preview_digest': '58402625bca5f2a17cb3b9caa7f77e106ede1b42d1031fb25a09fd54b6d8a13a'}
+        self.assertEqual(golden['preview_digest'], '58402625bca5f2a17cb3b9caa7f77e106ede1b42d1031fb25a09fd54b6d8a13a')
+        self.service.reasoning_effort_supported = True
+        result = self.service.prepare({'protocol_version': 2, 'input_revision': golden['input_revision'], 'expected_route': golden['expected_route'], 'input': self.raw(), 'execution': golden['execution']})
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['data']['prepared'], golden['prepared'])
+        self.assertEqual(result['data']['execution'], golden['execution'])
+        self.assertEqual(result['data']['preview_digest'], golden['preview_digest'])
+
+    def v2_prepare(self, execution, expected=ROUTE, value=None):
+        return self.service.prepare({'protocol_version': 2, 'input_revision': 2, 'expected_route': expected, 'input': self.raw() if value is None else value, 'execution': execution})
+
+    def v2_start(self, prepared, identity=IDENTITY):
+        return self.service.start({'protocol_version': 2, 'identity': identity, 'expected_route': prepared['expected_route'], 'prepared': prepared['prepared'], 'preview_digest': prepared['preview_digest'], 'execution': prepared['execution']})
+
+    def test_v2_trust_allowlists_and_revocation(self):
+        execution = {'model_override': {'provider': 'EXAMPLE', 'model': 'Model-X'}, 'reasoning_effort': None}
+        override = execution['model_override']
+        self.route = {}
+        self.error(self.v2_prepare(execution, override), 'override_denied')
+        policy = {'allow_provider_override': True, 'allow_model_override': True, 'allowed_providers': ['example'], 'allowed_models': ['model-x']}
+        self.service.read_execution_policy = lambda: policy
+        prepared = self.v2_prepare(execution, override)['data']
+        policy['allowed_models'] = []
+        self.error(self.v2_start(prepared), 'override_denied')
+        policy['allowed_models'] = ['*']
+        started = self.v2_start(prepared)['data']
+        policy['allow_provider_override'] = False
+        self.queue.pop()()
+        status = self.service.status({'protocol_version': 2, **started})['data']
+        self.assertEqual(status['error']['code'], 'override_denied')
+        self.assertFalse(self.calls)
+        self.assertEqual(refiner.MESSAGES['override_denied'], 'The host does not permit this model override.')
+
+    def test_v2_effort_digest_validation_and_exact_kwargs(self):
+        self.service.reasoning_effort_supported = True
+        self.route['reasoning_effort'] = 'low'
+        execution = {'model_override': None, 'reasoning_effort': 'high'}
+        prepared = self.v2_prepare(execution)['data']
+        changed = copy.deepcopy(prepared)
+        changed['execution']['reasoning_effort'] = 'medium'
+        self.error(self.v2_start(changed), 'preview_required')
+        started = self.v2_start(prepared)['data']
+        prepared['execution']['reasoning_effort'] = 'max'
+        self.queue.pop()()
+        self.assertEqual(self.calls[0]['reasoning_effort'], 'high')
+        self.assertNotIn('provider', self.calls[0])
+        self.assertNotIn('model', self.calls[0])
+        self.assertEqual(self.calls[0]['task'], 'prompt_refinement')
+        self.assertEqual(self.route['reasoning_effort'], 'low')
+        self.assertEqual(self.service.status({'protocol_version': 2, **started})['data']['state'], 'succeeded')
+        self.assertTrue(self.service.release({'protocol_version': 2, **started})['data']['released'])
+        prepared = self.v2_prepare({'model_override': None, 'reasoning_effort': None})['data']
+        self.v2_start(prepared)
+        self.queue.pop()()
+        self.assertNotIn('reasoning_effort', self.calls[-1])
+
+    def test_v2_override_exact_kwargs_and_independent_jobs(self):
+        self.service.reasoning_effort_supported = True
+        self.service.read_execution_policy = lambda: {'allow_provider_override': True, 'allow_model_override': True}
+        a = {'model_override': {'provider': 'Provider-A', 'model': 'Model-A'}, 'reasoning_effort': 'low'}
+        b = {'model_override': {'provider': 'Provider-B', 'model': 'Model-B'}, 'reasoning_effort': 'ultra'}
+        first = self.v2_prepare(a, a['model_override'])['data']
+        second = self.v2_prepare(b, b['model_override'])['data']
+        self.v2_start(first)
+        other = dict(IDENTITY, request_id='55555555-5555-4555-8555-555555555555')
+        self.v2_start(second, other)
+        first['execution']['model_override']['model'] = 'changed'
+        self.queue.pop(0)()
+        self.queue.pop(0)()
+        self.assertEqual([(c['provider'], c['model'], c['reasoning_effort'], c['task']) for c in self.calls], [('Provider-A', 'Model-A', 'low', 'prompt_refinement'), ('Provider-B', 'Model-B', 'ultra', 'prompt_refinement')])
+
+    def test_v2_invalid_execution_and_metadata(self):
+        defaults = {'model_override': None, 'reasoning_effort': None}
+        self.route['reasoning_effort'] = 'LOW'
+        description = self.service.describe({'protocol_version': 2})['data']
+        self.assertIsNone(description['configured_reasoning_effort'])
+        self.assertEqual(description['execution_support'], {'model_override': False, 'reasoning_effort': False})
+        self.route['reasoning_effort'] = 'high'
+        self.assertEqual(self.service.describe({'protocol_version': 2})['data']['configured_reasoning_effort'], 'high')
+        self.error(self.v2_prepare(dict(defaults, reasoning_effort='high')), 'incompatible_api')
+        for execution in (None, {}, dict(defaults, extra=True), dict(defaults, reasoning_effort='HIGH'), dict(defaults, reasoning_effort=[]), dict(defaults, model_override={'provider': 'p'}), dict(defaults, model_override={'provider': 'p ', 'model': 'm'}), dict(defaults, model_override={'provider': 'p', 'model': 'm', 'extra': 1})):
+            with self.subTest(execution=execution):
+                self.error(self.v2_prepare(execution), 'invalid_params')
+        self.error(self.service.describe({'protocol_version': 2, 'extra': 1}), 'invalid_params')
+
+    def test_v2_image_attestation_is_exact_at_each_stage(self):
+        import io
+        from PIL import Image
+        buffer = io.BytesIO()
+        Image.new('RGB', (1, 1)).save(buffer, format='PNG')
+        value = self.raw()
+        value['files'].append({'id': '77777777-7777-4777-8777-777777777777', 'kind': 'image', 'name': 'x.png', 'mime': 'image/png', 'data_base64': base64.b64encode(buffer.getvalue()).decode()})
+        override = {'provider': 'p', 'model': 'm'}
+        execution = {'model_override': override, 'reasoning_effort': None}
+        self.service.read_execution_policy = lambda: {'allow_provider_override': True, 'allow_model_override': True}
+        self.attestation = dict(ROUTE, confirmed=True, compatibility_baseline=refiner.BASELINE)
+        self.error(self.v2_prepare(execution, override, value), 'image_not_confirmed')
+        self.attestation = dict(override, confirmed=True, compatibility_baseline=refiner.BASELINE)
+        prepared = self.v2_prepare(execution, override, value)['data']
+        self.attestation = dict(ROUTE, confirmed=True, compatibility_baseline=refiner.BASELINE)
+        self.error(self.v2_start(prepared), 'image_not_confirmed')
+        self.attestation = dict(override, confirmed=True, compatibility_baseline=refiner.BASELINE)
+        started = self.v2_start(prepared)['data']
+        self.attestation = {}
+        self.queue.pop()()
+        self.assertEqual(self.service.status({'protocol_version': 2, **started})['data']['error']['code'], 'image_not_confirmed')
+        self.assertFalse(self.calls)
+
     def test_golden_prepare_and_digest(self):
         result = self.prepare()
         self.assertEqual(result, {"ok": True, "data": {"input_revision": 2, "expected_route": ROUTE, "prepared": PREPARED, "preview_digest": DIGEST, "redacted": False}})
@@ -488,9 +598,16 @@ class RefinerTests(unittest.TestCase):
             fake_redactor = SimpleNamespace(redact_sensitive_text=lambda value, **kw: (value, kw))
             with patch.dict(sys.modules, {'hermes_cli': SimpleNamespace(), 'hermes_cli.config': fake_config, 'agent': SimpleNamespace(), 'agent.redact': fake_redactor}):
                 self.assertEqual(calls, [])
-                self.assertEqual(module._route(), {'provider': 'p', 'model': 'm', 'inherit_from': ''})
+                self.assertEqual(module._route(), {'provider': 'p', 'model': 'm', 'inherit_from': '', 'reasoning_effort': None})
                 self.assertEqual(module._redact('fixture'), ('fixture', {'force': True}))
                 self.assertEqual(calls, ['read'])
+            self.assertTrue(module._reasoning_supported(lambda *, reasoning_effort=None: None))
+            self.assertFalse(module._reasoning_supported(lambda **kwargs: None))
+            self.assertFalse(module._reasoning_supported(lambda reasoning_effort, /: None))
+            policy_config = {'plugins': {'entries': {'prompt-refiner': {'llm': {'allow_provider_override': True, 'allow_model_override': True, 'allowed_providers': ['A', 42], 'allowed_models': ['*'], 'secret': 'hidden'}}}}}
+            fake_config.load_config_readonly = lambda: policy_config
+            with patch.dict(sys.modules, {'hermes_cli': SimpleNamespace(), 'hermes_cli.config': fake_config}):
+                self.assertEqual(module._execution_policy(), {'allow_provider_override': True, 'allow_model_override': True, 'allowed_providers': ['A'], 'allowed_models': ['*']})
         finally:
             sys.modules.pop(spec.name, None)
             sys.modules.pop(spec.name + '.refiner', None)

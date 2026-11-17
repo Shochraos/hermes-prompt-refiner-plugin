@@ -1,9 +1,10 @@
 import contextvars
+import inspect
 import secrets
 import threading
 import time
 
-from .refiner import RefinerService
+from .refiner import EFFORTS, RefinerService
 
 
 def _route():
@@ -11,9 +12,36 @@ def _route():
 
     config = load_config_readonly()
     task = config.get("auxiliary", {}).get("prompt_refinement", {})
-    result = {key: task.get(key) for key in ("provider", "model", "inherit_from")}
+    result = {key: task.get(key) for key in ("provider", "model", "inherit_from", "reasoning_effort")}
+    effort = result["reasoning_effort"]
+    if not isinstance(effort, str) or effort not in EFFORTS:
+        result["reasoning_effort"] = None
     del task, config
     return result
+
+
+def _execution_policy():
+    from hermes_cli.config import load_config_readonly
+
+    value = load_config_readonly()
+    for key in ("plugins", "entries", "prompt-refiner", "llm"):
+        value = value.get(key) if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        return {}
+    result = {key: value.get(key) is True for key in ("allow_provider_override", "allow_model_override")}
+    for key in ("allowed_providers", "allowed_models"):
+        item = value.get(key)
+        if isinstance(item, list):
+            result[key] = [entry for entry in item if isinstance(entry, str)]
+    return result
+
+
+def _reasoning_supported(complete):
+    try:
+        parameter = inspect.signature(complete).parameters.get("reasoning_effort")
+        return parameter is not None and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    except (TypeError, ValueError):
+        return False
 
 
 def _redact(text):
@@ -37,6 +65,8 @@ def register(ctx):
         monotonic=time.monotonic,
         random_bytes=secrets.token_bytes,
         launch_worker=_launch,
+        read_execution_policy=_execution_policy,
+        reasoning_effort_supported=_reasoning_supported(ctx.llm.complete_structured),
     )
     ctx.register_auxiliary_task("prompt_refinement", display_name="Prompt refiner", description="Independent conversational prompt refinement")
     for name in ("describe", "prepare", "start", "status", "release", "cancel"):
