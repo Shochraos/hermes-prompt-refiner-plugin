@@ -1,5 +1,4 @@
 import contextvars
-import inspect
 import secrets
 import threading
 import time
@@ -36,14 +35,6 @@ def _execution_policy():
     return result
 
 
-def _reasoning_supported(complete):
-    try:
-        parameter = inspect.signature(complete).parameters.get("reasoning_effort")
-        return parameter is not None and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    except (TypeError, ValueError):
-        return False
-
-
 def _redact(text):
     from agent.redact import redact_sensitive_text
 
@@ -66,7 +57,6 @@ def register(ctx):
         random_bytes=secrets.token_bytes,
         launch_worker=_launch,
         read_execution_policy=_execution_policy,
-        reasoning_effort_supported=_reasoning_supported(ctx.llm.complete_structured),
     )
     ctx.register_auxiliary_task("prompt_refinement", display_name="Prompt refiner", description="Independent conversational prompt refinement")
     for name in ("describe", "prepare", "start", "status", "release", "cancel"):

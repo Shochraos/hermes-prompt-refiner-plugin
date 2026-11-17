@@ -9,8 +9,8 @@ const golden = {
   input_revision:2,
   expected_route:{provider:'openai-codex',model:'fixture-model'},
   prepared:{original_draft:'Bitte erkläre ./build.sh; nicht ausführen.',source_messages:[{id:'11111111-1111-4111-8111-111111111111',role:'user',sequence:0,truncated:false,text:'Nur erklären.'}],files:[{id:'22222222-2222-4222-8222-222222222222',kind:'text',name:'notes.txt',text:'Keine Builds.\n'}],turns:[{role:'user',text:'Deutsch bitte.'},{role:'assistant',text:'Gern.'}],user_input:'Formuliere die Anfrage präzise.',candidate_prompt:null},
-  execution:{model_override:null,reasoning_effort:'high'},
-  preview_digest:'58402625bca5f2a17cb3b9caa7f77e106ede1b42d1031fb25a09fd54b6d8a13a'
+  execution:{model_override:null,reasoning_effort:null},
+  preview_digest:'8be8824e2a8a13f5808bf27ced818e40a015fd88f52cb980fbc5626c3ec27a8b'
 }
 const plain = value => JSON.parse(JSON.stringify(value))
 const description = {configured_route:golden.expected_route,configured_reasoning_effort:'high',execution_support:{model_override:true,reasoning_effort:true},image_eligibility:'not_confirmed',host_fallback_unresolved:true,model_timeout_seconds:90,compatibility_baseline:'081e8d9b75b2bedae297a89232b04ef9be7b26a0',limits:{max_files:8,max_images:3,max_text_file_bytes:65536,max_model_text_bytes:131072,max_image_bytes:1048576,max_image_pixels:4000000,max_rpc_bytes:6291456,max_candidate_bytes:32768,max_reply_bytes:16384,max_source_messages:40,max_turns:64,max_output_tokens:4096,max_running_jobs:2,max_retained_jobs:8,result_ttl_seconds:120}}
@@ -59,7 +59,7 @@ test('actual module registers native action and pane; fresh capture never reads 
   await new Promise(resolve=>setImmediate(resolve)); await new Promise(resolve=>setImmediate(resolve))
   assert.equal(reads,0); assert.equal(f.requests.length,1); assert.equal(f.requests[0][1],'plugin.prompt-refiner.describe')
   const pane=f.contributions[0].render(); pane.type(pane.props)
-  assert.equal(f.options[1].enabled,false);assert.equal(f.options[1].retry,false);assert.equal(f.options[1].refetchInterval,3000)
+  assert.equal(f.options[0].enabled,false);assert.equal(f.options[0].retry,false);assert.equal(f.options[0].refetchInterval,3000)
   f.disposers[0]()
 })
 
@@ -90,14 +90,14 @@ test('prepare and send are distinct; golden prepared payload and digest are forw
 
 test('session execution is sent in v2 and invalidates a preview',async()=>{
   const f=fixture((await load()).mod),c=f.controller
-  await c.open();c.setInput({userInput:'question'});c.setExecution({model_override:{provider:'trusted',model:'model'},reasoning_effort:'low'})
+  await c.open();c.setInput({userInput:'question'});c.setExecution({model_override:{provider:'trusted',model:'model'}})
   await c.prepare();const prepare=f.calls.at(-1)
-  assert.equal(prepare.params.protocol_version,2);assert.deepEqual(prepare.params.execution,{model_override:{provider:'trusted',model:'model'},reasoning_effort:'low'})
+  assert.equal(prepare.params.protocol_version,2);assert.deepEqual(prepare.params.execution,{model_override:{provider:'trusted',model:'model'},reasoning_effort:null})
   assert.deepEqual(prepare.params.expected_route,{provider:'trusted',model:'model'})
-  c.setExecution({reasoning_effort:'high'});assert.equal(f.state.prepared,null)
+  c.setExecution({model_override:{provider:'trusted',model:'other'}});assert.equal(f.state.prepared,null)
   await c.prepare();await c.send();const start=f.calls.at(-1)
-  assert.equal(start.params.protocol_version,2);assert.deepEqual(start.params.execution,{model_override:{provider:'trusted',model:'model'},reasoning_effort:'high'})
-  assert.deepEqual(start.params.expected_route,{provider:'trusted',model:'model'})
+  assert.equal(start.params.protocol_version,2);assert.deepEqual(start.params.execution,{model_override:{provider:'trusted',model:'other'},reasoning_effort:null})
+  assert.deepEqual(start.params.expected_route,{provider:'trusted',model:'other'})
 })
 
 test('candidate edits survive late proposal; copy is explicit and acknowledgement checked',async()=>{
@@ -213,20 +213,19 @@ test('model controller stays local and uses captured owner',async()=>{
   assert.equal(catalog.props.selectionOnly,true);assert.equal(catalog.props.profile,'target');assert.equal(catalog.props.ownerConnectionId,'conn');assert.equal(catalog.props.controller.allowSpeed,false)
   assert.deepEqual(plain(catalog.props.controller.presetFor()),{})
   catalog.props.controller.select('other','provider');catalog.props.controller.setOptions({effort:'low'},{model:'other',provider:'provider',isActive:true})
-  const labels=nodes(f.render());assert.ok(labels.some(n=>n.props?.children==='other'));assert.ok(labels.some(n=>n.props?.children==='Low'))
+  const labels=nodes(f.render());assert.ok(labels.some(n=>n.props?.children==='other'));assert.equal(f.contributions[0].render().props.controller.getState().execution.reasoning_effort,null)
   await catalog.props.request('model.options',{explicit_only:true});assert.equal(f.requests.at(-1)[1],'model.options');assert.deepEqual(plain(f.requests.at(-1)[0]),f.route)
   assert.equal(f.requests.some(r=>/config|setting|preset/.test(r[1])),false)
 })
 
-test('unsupported and older SDK model catalogs fail closed while reasoning remains available',async()=>{
+test('unsupported and older SDK model catalogs fail closed without effort controls',async()=>{
   for (const options of [{selectionOnly:false},{oldSdk:true}]) {
     const f=await load(options);f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
     let all=nodes(f.render()),root=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'))
     assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true)
     root.props.onOpenChange(true);all=nodes(f.render());assert.equal(all.some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.equal(all.some(n=>n.props?.children==='Use configured refiner'),false)
-    const effort=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'));effort.props.onOpenChange(true)
-    nodes(f.render()).find(n=>n.props?.role==='menuitemradio' && n.props.children==='Low').props.onSelect()
-    assert.equal(f.contributions[0].render().props.controller.getState().execution.reasoning_effort,'low')
+    assert.equal(all.some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
+    assert.equal(f.contributions[0].render().props.controller.getState().execution.reasoning_effort,null)
   }
 })
 
@@ -241,7 +240,7 @@ test('revoked catalog capability fences stale handlers and unmounts controls',as
 
 test('unsupported controls are disabled and resize works by keyboard and pointer',async()=>{
   const f=await load();f.setRequest(async()=>({ok:true,data:{...description,execution_support:{model_override:false,reasoning_effort:false}}}));f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  let all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true);assert.equal(all.find(n=>n.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,true)
+  let all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true);assert.equal(all.some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
   let grip=all.find(n=>n.props?.['aria-label']==='Resize message input');grip.props.onKeyDown({key:'ArrowUp',preventDefault(){}});grip=nodes(f.render()).find(n=>n.props?.['aria-label']==='Resize message input');assert.equal(grip.props['aria-valuenow'],48)
   grip.props.onPointerDown({button:0,pointerId:1,clientY:100,currentTarget:{setPointerCapture(){}},preventDefault(){}});grip.props.onPointerMove({pointerId:1,clientY:70});grip=nodes(f.render()).find(n=>n.props?.['aria-label']==='Resize message input');assert.equal(grip.props['aria-valuenow'],78)
 })
@@ -435,13 +434,13 @@ test('stored draft prepopulates visible input without a hidden original draft',a
   assert.equal(input.original_draft,'');assert.equal(input.user_input,'revised text')
 })
 
-test('refresh preserves session edits, discard resets and reseeds without setting RPCs',async()=>{
+test('refresh preserves model selection, discard resets without setting RPCs',async()=>{
   const f=fixture((await load()).mod),c=f.controller
-  await c.open();assert.equal(f.state.execution.reasoning_effort,'high')
-  c.setExecution({reasoning_effort:'low',model_override:{provider:'p',model:'m'}})
-  await c.refreshRoute();assert.deepEqual(plain(f.state.execution),{model_override:{provider:'p',model:'m'},reasoning_effort:'low'})
+  await c.open();assert.equal(f.state.routeInfo.configured_reasoning_effort,'high')
+  c.setExecution({model_override:{provider:'p',model:'m'}})
+  await c.refreshRoute();assert.deepEqual(plain(f.state.execution),{model_override:{provider:'p',model:'m'},reasoning_effort:null})
   c.discard();assert.deepEqual(plain(f.state.execution),{model_override:null,reasoning_effort:null})
-  await c.open();assert.deepEqual(plain(f.state.execution),{model_override:null,reasoning_effort:'high'})
+  await c.open();assert.deepEqual(plain(f.state.execution),{model_override:null,reasoning_effort:null})
   assert.deepEqual(f.calls.map(call=>call.method),Array(3).fill('plugin.prompt-refiner.describe'))
 })
 
@@ -449,7 +448,7 @@ test('unknown effort stays null and unsupported execution APIs are refused',asyn
   const unsupported={...description,configured_reasoning_effort:null,execution_support:{model_override:false,reasoning_effort:false}}
   const f=fixture((await load()).mod,{requestProfile:async()=>({ok:true,data:unsupported})}),c=f.controller
   await c.open();assert.equal(f.state.execution.reasoning_effort,null)
-  c.setExecution({reasoning_effort:'low'});assert.equal(f.state.error,'Required Hermes plugin API is unavailable.');assert.equal(f.state.execution.reasoning_effort,null)
+  c.setExecution({reasoning_effort:'low'});assert.equal(f.state.error,'Request fields or types are invalid.');assert.equal(f.state.execution.reasoning_effort,null)
   c.setExecution({model_override:{provider:'p',model:'m'}});assert.equal(f.state.execution.model_override,null)
   c.setExecution({reasoning_effort:'default'});assert.equal(f.state.error,'Request fields or types are invalid.')
   const g=fixture((await load()).mod,{requestProfile:async()=>({ok:true,data:{...unsupported,configured_reasoning_effort:'high'}})})
@@ -477,7 +476,7 @@ test('execution validation rejects extra fields, whitespace and changed preview 
 test('route refresh and execution edits fence pending preview adoption',async()=>{
   const waiting=deferred();let desc=description
   const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:desc}:waiting.promise}),c=f.controller
-  await c.open();c.setInput({userInput:'x'});const pending=c.prepare();c.setExecution({reasoning_effort:'low'})
+  await c.open();c.setInput({userInput:'x'});const pending=c.prepare();c.setExecution({model_override:{provider:'p',model:'m'}})
   waiting.resolve({ok:true,data:{...golden,input_revision:1,redacted:false}});await pending;assert.equal(f.state.prepared,null)
   const waiting2=deferred();const g=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:desc}:waiting2.promise})
   await g.controller.open();g.controller.setInput({userInput:'x'});const pending2=g.controller.prepare();desc={...description,execution_support:{model_override:false,reasoning_effort:false}};await g.controller.refreshRoute()
@@ -506,50 +505,48 @@ test('model change invalidates preview and refresh withdraws image attestation',
   desc={...desc,image_eligibility:'not_confirmed'};await c.refreshRoute();assert.equal(f.state.prepared,null)
 })
 
+test('refreshing changed saved reasoning invalidates the preview',async()=>{
+  let desc=description
+  const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:desc}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}}),c=f.controller
+  await c.open();c.setInput({userInput:'x'});await c.prepare();assert.ok(f.state.prepared)
+  desc={...desc,configured_reasoning_effort:'low'};await c.refreshRoute()
+  assert.equal(f.state.prepared,null);assert.equal(f.state.routeInfo.configured_reasoning_effort,'low');assert.equal(f.state.execution.reasoning_effort,null)
+})
+
 test('busy request rejects execution edits before start acknowledgement',async()=>{
   const waiting=deferred(),calls=[]
   const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>{calls.push(m);if(m.endsWith('describe'))return {ok:true,data:description};if(m.endsWith('prepare'))return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}};if(m.endsWith('start')){await waiting.promise;return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}};return {ok:true,data:{released:true,abandoned:false}}}}),c=f.controller
-  await c.open();c.setInput({userInput:'x'});await c.prepare();const sending=c.send();c.setExecution({reasoning_effort:'low'});waiting.resolve();await sending;await tick()
+  await c.open();c.setInput({userInput:'x'});await c.prepare();const sending=c.send();c.setExecution({model_override:{provider:'p',model:'m'}});waiting.resolve();await sending;await tick()
   assert.ok(f.state.job);assert.equal(calls.includes('plugin.prompt-refiner.release'),false)
 })
 
 
-test('model and reasoning triggers belong to distinct menu roots',async()=>{
+test('model control does not expose an effort menu',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   const roots=nodes(f.render()).filter(n=>n.type?.name==='DropdownMenu')
   const model=roots.find(n=>nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'))
   const effort=roots.find(n=>nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'))
-  assert.ok(model);assert.ok(effort);assert.notEqual(model,effort)
+  assert.ok(model);assert.equal(effort,undefined)
 })
 
 
-test('reasoning menu reads owner catalog and selects canonical effort without model permission',async()=>{
-  const f=await load();f.setRequest(async(r,m)=>m.endsWith('describe')?{ok:true,data:{...description,execution_support:{model_override:false,reasoning_effort:true}}}:{providers:[]})
-  f.setCatalog({providers:[{slug:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:false}}}]})
-  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  let all=nodes(f.render()),query=f.options.find(x=>x.queryKey[1]==='model-options');await query.queryFn()
-  assert.deepEqual(plain(f.requests.at(-1)[0]),f.route);assert.deepEqual(plain(f.requests.at(-1)[2]),{explicit_only:true,profile:'target'})
-  let root=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'))
-  assert.equal(nodes(root).find(x=>x.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,false)
-  root.props.onOpenChange(true);all=nodes(f.render());const items=all.filter(n=>n.props?.role==='menuitemradio')
-  assert.equal(items.some(n=>n.props.children==='Off'),false);items.find(n=>n.props.children==='Low').props.onSelect()
-  assert.ok(nodes(f.render()).some(n=>n.props?.children==='Low'))
-  assert.equal(f.requests.some(r=>/setting|preset|config/.test(r[1])),false)
+test('advertised effort support cannot enable overrides',async()=>{
+  const f=fixture((await load()).mod),c=f.controller
+  await c.open();c.setExecution({reasoning_effort:'low'})
+  assert.equal(f.state.execution.reasoning_effort,null);assert.equal(f.state.error,'Request fields or types are invalid.')
+  assert.equal(f.state.routeInfo.configured_reasoning_effort,'high')
 })
 
-test('unknown, other-provider and busy reasoning cannot alter execution',async()=>{
+test('busy model selection cannot alter execution',async()=>{
   const f=await load(),wait=deferred();f.setRequest(async(r,m,p)=>{if(m.endsWith('describe'))return {ok:true,data:description};if(m.endsWith('prepare'))return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}};if(m.endsWith('start'))return wait.promise;return {providers:[]}})
   f.setCatalog({providers:[{slug:'other',capabilities:{'fixture-model':{reasoning:true}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
-  let all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,true)
-  f.setCatalog({providers:[{slug:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:true}}}]});all=nodes(f.render())
-  let root=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'));root.props.onOpenChange(true)
-  const stale=nodes(f.render()).find(n=>n.props?.role==='menuitemradio' && n.props.children==='Low')
+  let all=nodes(f.render());assert.equal(all.some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
   const modelRoot=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));modelRoot.props.onOpenChange(true)
   const staleCatalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu'),staleReset=nodes(f.render()).find(n=>n.props?.children==='Use configured refiner')
   typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick();click(f,'Send to refiner');await tick()
-  all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true);assert.equal(all.find(n=>n.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,true)
-  stale.props.onSelect();modelRoot.props.onOpenChange(true);staleCatalog.props.controller.select('other','provider');staleCatalog.props.controller.applyPreset({effort:'low'},{model:'other',provider:'provider'});staleReset.props.onSelect();await assert.rejects(staleCatalog.props.request('model.options',{}),/model catalog unavailable/)
-  assert.equal(nodes(f.render()).some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.ok(nodes(f.render()).some(n=>n.props?.children==='High'));assert.equal(f.contributions[0].render().props.controller.getState().execution.model_override,null)
+  all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true)
+  modelRoot.props.onOpenChange(true);staleCatalog.props.controller.select('other','provider');staleCatalog.props.controller.applyPreset({effort:'low'},{model:'other',provider:'provider'});staleReset.props.onSelect();await assert.rejects(staleCatalog.props.request('model.options',{}),/model catalog unavailable/)
+  assert.equal(nodes(f.render()).some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.equal(f.contributions[0].render().props.controller.getState().execution.model_override,null)
   wait.resolve({ok:false,error:{code:'busy',message:'The refiner has no available request slot.'}});await tick()
 })
 
@@ -573,52 +570,50 @@ test('panel copy sends only candidate text and reports clipboard acknowledgement
 })
 
 
-test('non-reasoning native selection clears hidden effort in prepared execution',async()=>{
+test('model selection keeps saved effort and sends no override',async()=>{
   const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:{providers:[]})
   f.setCatalog({providers:[{slug:'provider',capabilities:{other:{reasoning:false}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick()
-  const controller=f.contributions[0].render().props.controller;assert.ok(controller.getState().prepared);assert.equal(controller.getState().execution.reasoning_effort,'high')
+  const controller=f.contributions[0].render().props.controller;assert.ok(controller.getState().prepared);assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
   const root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
   const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,row={model:'other',provider:'provider',capabilities:{reasoning:false}}
   catalog.select(row.model,row.provider);assert.equal(controller.getState().prepared,null);assert.equal(controller.getState().execution.reasoning_effort,null)
-  assert.equal(nodes(f.render()).find(n=>n.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,true)
+  assert.equal(nodes(f.render()).some(n=>n.props?.['aria-label']==='Reasoning effort for this conversation'),false)
+  assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
   click(f,'Prepare preview');await tick();const call=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)
   assert.equal(call[2].execution.reasoning_effort,null);assert.deepEqual(plain(call[2].execution.model_override),{model:'other',provider:'provider'})
   assert.deepEqual(f.composerWrites,[]);assert.equal(f.requests.some(r=>/setting|preset|config/.test(r[1])),false)
 })
 
-test('selection omits effort without backend support and allows later effort choice when supported',async()=>{
+test('selection never sets effort regardless of advertised backend support',async()=>{
   for (const supported of [false,true]) {
     const f=await load();f.setRequest(async()=>({ok:true,data:{...description,execution_support:{model_override:true,reasoning_effort:supported}}}))
     f.setCatalog({providers:[{slug:'provider',capabilities:{other:{reasoning:true}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
     const controller=f.contributions[0].render().props.controller,root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
     const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,writes=[],setExecution=controller.setExecution
     controller.setExecution=values=>{writes.push(values);return setExecution(values)};catalog.select('other','provider')
-    assert.equal(Object.hasOwn(writes[0],'reasoning_effort'),supported);assert.equal(controller.getState().execution.reasoning_effort,null)
-    if (supported) {
-      const effort=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'));effort.props.onOpenChange(true)
-      nodes(f.render()).find(n=>n.props?.role==='menuitemradio' && n.props.children==='Low').props.onSelect();assert.equal(controller.getState().execution.reasoning_effort,'low')
-    }
+    assert.equal(Object.hasOwn(writes[0],'reasoning_effort'),false);assert.equal(controller.getState().execution.reasoning_effort,null)
+    assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
   }
 })
 
-test('preset rejects invalid effort and omits effort updates without backend support',async()=>{
+test('preset and options cannot mutate temporary execution',async()=>{
   for (const supported of [true,false]) {
     const f=await load();f.setRequest(async()=>({ok:true,data:{...description,configured_reasoning_effort:supported?'high':null,execution_support:{model_override:true,reasoning_effort:supported}}}));f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
     const controller=f.contributions[0].render().props.controller,root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
     const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,row={model:'other',provider:'provider'},writes=[],setExecution=controller.setExecution
     controller.setExecution=values=>{writes.push(values);return setExecution(values)};catalog.applyPreset({effort:false},row)
-    if (supported) {assert.equal(controller.getState().execution.model_override,null);assert.equal(controller.getState().execution.reasoning_effort,'high')}
-    else {assert.equal(Object.hasOwn(writes[0],'reasoning_effort'),false);assert.deepEqual(plain(controller.getState().execution.model_override),row);assert.equal(controller.getState().execution.reasoning_effort,null)}
+    catalog.setOptions({effort:'low'},row)
+    assert.equal(writes.length,0);assert.equal(controller.getState().execution.model_override,null);assert.equal(controller.getState().execution.reasoning_effort,null)
   }
 })
 
-test('configured refiner clears temporary override and restores configured effort',async()=>{
+test('configured refiner clears temporary override without mutating saved effort',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
   let root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
   nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller.select('other','provider');
   nodes(f.render()).find(n=>n.props?.children==='Use configured refiner').props.onSelect();
-  const controller=f.contributions[0].render().props.controller;assert.deepEqual(plain(controller.getState().execution),{model_override:null,reasoning_effort:'high'})
+  const controller=f.contributions[0].render().props.controller;assert.deepEqual(plain(controller.getState().execution),{model_override:null,reasoning_effort:null});assert.equal(controller.getState().routeInfo.configured_reasoning_effort,'high')
   assert.equal(f.requests.some(r=>/setting|preset|config/.test(r[1])),false)
 })
 

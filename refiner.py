@@ -275,8 +275,7 @@ def validate_execution(value):
         route(value["model_override"])
         if any(part != part.strip() for part in value["model_override"].values()):
             fail("invalid_params")
-    effort = value["reasoning_effort"]
-    if effort is not None and (not isinstance(effort, str) or effort not in EFFORTS):
+    if value["reasoning_effort"] is not None:
         fail("invalid_params")
 
 
@@ -348,7 +347,7 @@ def handler(method):
 
 
 class RefinerService:
-    def __init__(self, *, model_complete, read_route, read_image_attestation, redact_text, monotonic, random_bytes, launch_worker, read_execution_policy=None, reasoning_effort_supported=False):
+    def __init__(self, *, model_complete, read_route, read_image_attestation, redact_text, monotonic, random_bytes, launch_worker, read_execution_policy=None):
         self.model_complete = model_complete
         self.read_route = read_route
         self.read_image_attestation = read_image_attestation
@@ -357,7 +356,6 @@ class RefinerService:
         self.random_bytes = random_bytes
         self.launch_worker = launch_worker
         self.read_execution_policy = read_execution_policy or (lambda: {})
-        self.reasoning_effort_supported = reasoning_effort_supported is True
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.jobs = {}
@@ -411,8 +409,6 @@ class RefinerService:
         route(expected)
         if execution is not None:
             validate_execution(execution)
-            if execution["reasoning_effort"] is not None and not self.reasoning_effort_supported:
-                fail("incompatible_api")
         override = execution["model_override"] if execution is not None else None
         if override is None:
             current = self.configured()
@@ -444,7 +440,7 @@ class RefinerService:
             config = self.read_route()
             effort = config.get("reasoning_effort") if isinstance(config, dict) else None
             policy = self.policy()
-            result.update(configured_reasoning_effort=effort if isinstance(effort, str) and effort in EFFORTS else None, execution_support={"model_override": policy.get("allow_provider_override") is True and policy.get("allow_model_override") is True, "reasoning_effort": self.reasoning_effort_supported})
+            result.update(configured_reasoning_effort=effort if isinstance(effort, str) and effort in EFFORTS else None, execution_support={"model_override": policy.get("allow_provider_override") is True and policy.get("allow_model_override") is True, "reasoning_effort": False})
         return result
 
     @handler
@@ -543,8 +539,6 @@ class RefinerService:
             if execution is not None:
                 if execution["model_override"] is not None:
                     options.update(execution["model_override"])
-                if execution["reasoning_effort"] is not None:
-                    options["reasoning_effort"] = execution["reasoning_effort"]
             reply = self.model_complete(
                 instructions=REQUEST_INSTRUCTION,
                 input=blocks,
