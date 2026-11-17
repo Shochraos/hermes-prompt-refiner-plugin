@@ -372,7 +372,7 @@ function Panel({controller, store, ctx}) {
   const canUseModelMenu = current => sdk.MODEL_CATALOG_CAPABILITIES?.selectionOnly === true && canEdit(current)
   const menuController = {
     allowSpeed:false,
-    current:{model:route?.model || '',provider:route?.provider || '',effort:'',fast:false},
+    current:{model:route?.model || '',provider:route?.provider || '',effort:'',effortPending:true,fast:false},
     presetFor:()=>({}),
     select:(model,provider)=>{ const current=controller.getState(); if (canUseModelMenu(current) && current.routeInfo?.execution_support.model_override) controller.setExecution({model_override:{model,provider}}) },
     applyPreset:()=>{},
