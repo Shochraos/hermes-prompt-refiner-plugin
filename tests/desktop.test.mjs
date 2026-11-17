@@ -16,7 +16,7 @@ const plain = value => JSON.parse(JSON.stringify(value))
 const description = {configured_route:golden.expected_route,configured_reasoning_effort:'high',execution_support:{model_override:true,reasoning_effort:true},image_eligibility:'not_confirmed',host_fallback_unresolved:true,model_timeout_seconds:90,compatibility_baseline:'081e8d9b75b2bedae297a89232b04ef9be7b26a0',limits:{max_files:8,max_images:3,max_text_file_bytes:65536,max_model_text_bytes:131072,max_image_bytes:1048576,max_image_pixels:4000000,max_rpc_bytes:6291456,max_candidate_bytes:32768,max_reply_bytes:16384,max_source_messages:40,max_turns:64,max_output_tokens:4096,max_running_jobs:2,max_retained_jobs:8,result_ttl_seconds:120}}
 const deferred = () => { let resolve; const promise = new Promise(r => {resolve=r}); return {promise,resolve} }
 function makeAtom(value) { const listeners = new Set(); return {get:()=>value,set:v=>{value=v;for(const fn of listeners)fn(value)},listen:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}} }
-async function load() {
+async function load({selectionOnly = true, oldSdk = false} = {}) {
   const options = [], contributions = [], requests = [], disposers = [], removals = [], cancellations = [], navigations = [], reveals = [], composerWrites = []
   const route = {connectionId:'conn',mode:'remote',profile:'profile',targetProfile:'target'}
   const state = {focusedSessionOwner:makeAtom({connectionId:'conn',profile:'profile'}),focusedStoredSessionId:makeAtom(null),focusedSessionId:makeAtom(null)}
@@ -24,6 +24,7 @@ async function load() {
   const host = {state,composer:{getDraft:id=>draft(id),setDraft:(...args)=>composerWrites.push(args)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},revealPane:id=>reveals.push(id),navigate:path=>navigations.push(path),notify:()=>{}}
   const cache = {cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))}
   const sdk = {atom:makeAtom,useValue:a=>a.get(),useQuery:o=>{options.push(o);return o.queryKey[1]==='model-options'?{data:catalogData}:{}},queryClient:cache,host,gatewayActivationEpoch:()=>epoch,COMPOSER_AREAS:{actions:'composer.actions'},Button:function Button(){},Textarea:function Textarea(){},Checkbox:function Checkbox(){},DropdownMenu:function DropdownMenu(){},DropdownMenuTrigger:function DropdownMenuTrigger(){},DropdownMenuContent:function DropdownMenuContent(){},DropdownMenuItem:function DropdownMenuItem(){},Dialog:function Dialog(){},DialogContent:function DialogContent(){},DialogTitle:function DialogTitle(){},ModelCatalogMenu:function ModelCatalogMenu(){},ModelMenuCloseContext:{Provider:function Provider(){}},REASONING_EFFORTS:['minimal','low','medium','high','xhigh','max','ultra'],REASONING_EFFORT_VALUES:['none','minimal','low','medium','high','xhigh','max','ultra'],catalogProviderMatches:(p,v)=>p.slug===v||p.name===v||p.aliases?.includes(v),reasoningEffortLabel:value=>value === 'none'?'Off':value ? value[0].toUpperCase()+value.slice(1) : ''}
+  if (!oldSdk) sdk.MODEL_CATALOG_CAPABILITIES = {selectionOnly}
   const slots = [], effectDeps = []; let hook = 0, effectHook = 0, effectsEnabled = false, pendingEffects = []
   const react = {useState:v=>{const i=hook++;if (!(i in slots)) slots[i]=v;return [slots[i],value=>{slots[i]=typeof value==='function'?value(slots[i]):value}]},useRef:v=>{const i=hook++;if (!(i in slots)) slots[i]={current:v};return slots[i]},useEffect:(fn,deps)=>{const i=effectHook++;if(!effectsEnabled)return;if(!effectDeps[i] || deps.some((v,j)=>!Object.is(v,effectDeps[i][j]))){effectDeps[i]=deps;pendingEffects.push(fn)}}}
   const jsx = {jsx:(type,props,key)=>({type,props,key}),jsxs:(type,props,key)=>({type,props,key})}
@@ -39,7 +40,7 @@ async function load() {
   })
   await mod.evaluate()
   const ctx = {register:c=>contributions.push(c),onDispose:f=>disposers.push(f),os:{writeClipboard:async()=>true},files:{}}
-  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,state,route,get bitmapCalls(){return bitmapCalls},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
+  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,state,route,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
 }
 function fixture(mod, overrides={}) {
   let current, n=0
@@ -209,12 +210,33 @@ test('model controller stays local and uses captured owner',async()=>{
   const root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && n.props.open===false && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'))
   root.props.onOpenChange(true)
   const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu');assert.ok(catalog)
-  assert.equal(catalog.props.profile,'target');assert.equal(catalog.props.ownerConnectionId,'conn');assert.equal(catalog.props.controller.allowSpeed,false)
+  assert.equal(catalog.props.selectionOnly,true);assert.equal(catalog.props.profile,'target');assert.equal(catalog.props.ownerConnectionId,'conn');assert.equal(catalog.props.controller.allowSpeed,false)
   assert.deepEqual(plain(catalog.props.controller.presetFor()),{})
   catalog.props.controller.select('other','provider');catalog.props.controller.setOptions({effort:'low'},{model:'other',provider:'provider',isActive:true})
   const labels=nodes(f.render());assert.ok(labels.some(n=>n.props?.children==='other'));assert.ok(labels.some(n=>n.props?.children==='Low'))
   await catalog.props.request('model.options',{explicit_only:true});assert.equal(f.requests.at(-1)[1],'model.options');assert.deepEqual(plain(f.requests.at(-1)[0]),f.route)
   assert.equal(f.requests.some(r=>/config|setting|preset/.test(r[1])),false)
+})
+
+test('unsupported and older SDK model catalogs fail closed while reasoning remains available',async()=>{
+  for (const options of [{selectionOnly:false},{oldSdk:true}]) {
+    const f=await load(options);f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+    let all=nodes(f.render()),root=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'))
+    assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true)
+    root.props.onOpenChange(true);all=nodes(f.render());assert.equal(all.some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.equal(all.some(n=>n.props?.children==='Use configured refiner'),false)
+    const effort=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'));effort.props.onOpenChange(true)
+    nodes(f.render()).find(n=>n.props?.role==='menuitemradio' && n.props.children==='Low').props.onSelect()
+    assert.equal(f.contributions[0].render().props.controller.getState().execution.reasoning_effort,'low')
+  }
+})
+
+test('revoked catalog capability fences stale handlers and unmounts controls',async()=>{
+  const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+  let all=nodes(f.render()),root=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
+  all=nodes(f.render());const catalog=all.find(n=>n.type?.name==='ModelCatalogMenu'),reset=all.find(n=>n.props?.children==='Use configured refiner'),controller=f.contributions[0].render().props.controller,before=plain(controller.getState().execution),count=f.requests.length
+  f.setSelectionOnly(false);root.props.onOpenChange(true);catalog.props.controller.select('other','provider');catalog.props.controller.applyPreset({effort:'low'},{model:'other',provider:'provider'});catalog.props.controller.setOptions({effort:'low'},{model:'fixture-model',provider:'openai-codex'});reset.props.onSelect()
+  await assert.rejects(catalog.props.request('model.options',{}),/model catalog unavailable/)
+  all=nodes(f.render());assert.equal(all.some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.equal(all.some(n=>n.props?.children==='Use configured refiner'),false);assert.deepEqual(plain(controller.getState().execution),before);assert.equal(f.requests.length,count)
 })
 
 test('unsupported controls are disabled and resize works by keyboard and pointer',async()=>{
@@ -522,9 +544,12 @@ test('unknown, other-provider and busy reasoning cannot alter execution',async()
   f.setCatalog({providers:[{slug:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:true}}}]});all=nodes(f.render())
   let root=all.find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Reasoning effort for this conversation'));root.props.onOpenChange(true)
   const stale=nodes(f.render()).find(n=>n.props?.role==='menuitemradio' && n.props.children==='Low')
+  const modelRoot=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));modelRoot.props.onOpenChange(true)
+  const staleCatalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu'),staleReset=nodes(f.render()).find(n=>n.props?.children==='Use configured refiner')
   typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick();click(f,'Send to refiner');await tick()
   all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Refiner model for this conversation').props.disabled,true);assert.equal(all.find(n=>n.props?.['aria-label']==='Reasoning effort for this conversation').props.disabled,true)
-  stale.props.onSelect();assert.ok(nodes(f.render()).some(n=>n.props?.children==='High'))
+  stale.props.onSelect();modelRoot.props.onOpenChange(true);staleCatalog.props.controller.select('other','provider');staleCatalog.props.controller.applyPreset({effort:'low'},{model:'other',provider:'provider'});staleReset.props.onSelect();await assert.rejects(staleCatalog.props.request('model.options',{}),/model catalog unavailable/)
+  assert.equal(nodes(f.render()).some(n=>n.type?.name==='ModelCatalogMenu'),false);assert.ok(nodes(f.render()).some(n=>n.props?.children==='High'));assert.equal(f.contributions[0].render().props.controller.getState().execution.model_override,null)
   wait.resolve({ok:false,error:{code:'busy',message:'The refiner has no available request slot.'}});await tick()
 })
 
@@ -547,6 +572,29 @@ test('panel copy sends only candidate text and reports clipboard acknowledgement
   click(f,'Copy prompt');await tick();assert.deepEqual(copies,['candidate only']);assert.deepEqual(f.composerWrites,[]);assert.ok(nodes(f.render()).some(n=>n.props?.children==='Copied prompt. Paste it and reattach any required files yourself.'))
 })
 
+
+test('non-reasoning native selection clears hidden effort in prepared execution',async()=>{
+  const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:{providers:[]})
+  f.setCatalog({providers:[{slug:'provider',capabilities:{other:{reasoning:false}}}]});f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+  typeMessage(f,'hello');review(f);click(f,'Prepare preview');await tick()
+  const controller=f.contributions[0].render().props.controller;assert.ok(controller.getState().prepared)
+  const root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
+  const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,row={model:'other',provider:'provider',capabilities:{reasoning:false}}
+  catalog.select(row.model,row.provider);catalog.applyPreset({effort:undefined},row);assert.equal(controller.getState().prepared,null)
+  click(f,'Prepare preview');await tick();const call=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)
+  assert.equal(call[2].execution.reasoning_effort,null);assert.deepEqual(plain(call[2].execution.model_override),{model:'other',provider:'provider'})
+})
+
+test('preset rejects invalid effort and omits effort updates without backend support',async()=>{
+  for (const supported of [true,false]) {
+    const f=await load();f.setRequest(async()=>({ok:true,data:{...description,configured_reasoning_effort:supported?'high':null,execution_support:{model_override:true,reasoning_effort:supported}}}));f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+    const controller=f.contributions[0].render().props.controller,root=nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Refiner model for this conversation'));root.props.onOpenChange(true)
+    const catalog=nodes(f.render()).find(n=>n.type?.name==='ModelCatalogMenu').props.controller,row={model:'other',provider:'provider'},writes=[],setExecution=controller.setExecution
+    controller.setExecution=values=>{writes.push(values);return setExecution(values)};catalog.applyPreset({effort:false},row)
+    if (supported) {assert.equal(controller.getState().execution.model_override,null);assert.equal(controller.getState().execution.reasoning_effort,'high')}
+    else {assert.equal(Object.hasOwn(writes[0],'reasoning_effort'),false);assert.deepEqual(plain(controller.getState().execution.model_override),row);assert.equal(controller.getState().execution.reasoning_effort,null)}
+  }
+})
 
 test('configured refiner clears temporary override and restores configured effort',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
