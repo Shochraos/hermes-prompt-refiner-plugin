@@ -12,6 +12,9 @@ const closed = (value, keys) => value && typeof value === 'object' && !Array.isA
 const idValid = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
 const labelValid = s => safeText(s,256) && !!s.trim() && !/[\x00-\x1f\x7f-\x9f]/.test(s) && !['auto','default'].includes(s.trim().toLowerCase())
 const labelsValid = route => closed(route,['provider','model']) && labelValid(route.provider) && labelValid(route.model)
+const efforts = new Set('none minimal low medium high xhigh max ultra'.split(' '))
+const executionValid = value => closed(value,['model_override','reasoning_effort']) && (value.model_override === null || (labelsValid(value.model_override) && Object.values(value.model_override).every(part=>part === part.trim()))) && (value.reasoning_effort === null || efforts.has(value.reasoning_effort))
+const sameExecution = (a,b) => executionValid(a) && executionValid(b) && (a.model_override === null ? b.model_override === null : sameLabels(a.model_override,b.model_override)) && a.reasoning_effort === b.reasoning_effort
 const nameValid = name => safeText(name,255) && !!name.trim() && name !== '.' && name !== '..' && !/[/\\\x00-\x1f\x7f-\x9f]/.test(name)
 const base64Valid = (value, max, decodedMax) => typeof value === 'string' && value.length <= max && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value) && value.length / 4 * 3 - (value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0) <= decodedMax && (value.length === 0 || btoa(atob(value)) === value)
 function inputValid(input, prepared) {
@@ -37,20 +40,20 @@ const envelope = response => {
   if (!closed(response,['ok','data']) || response.ok !== true || !response.data || typeof response.data !== 'object') throw new Error('invalid response')
   return response.data
 }
-const errors = {incompatible_api:'Required Hermes plugin API is unavailable.',invalid_params:'Request fields or types are invalid.',too_large:'Input exceeds the refiner limits.',unsupported_type:'This file type is not supported.',invalid_encoding:'Text must be valid UTF-8.',invalid_image:'Image data is malformed or unsupported.',image_too_large:'Image dimensions exceed the refiner limit.',unsafe_input:'The host refused this input.',route_unconfigured:'Configure the independent refiner provider and model.',route_changed:'The configured refiner changed. Prepare a new preview.',image_not_confirmed:"Confirm this route's image compatibility in plugin settings.",preview_required:'Prepare and inspect a new preview before sending.',busy:'The refiner has no available request slot.',request_conflict:'This request identity already names different content.',job_not_found:'This job is unavailable.',timeout:'The model request timed out. Its remote outcome may be unknown.',model_failed:'The model request failed.',invalid_output:'The model response did not match the required format.',service_unloaded:'The refiner service is no longer available.',internal_error:'The refiner could not complete this operation.'}
+const errors = {override_denied:'The host does not permit this model override.',incompatible_api:'Required Hermes plugin API is unavailable.',invalid_params:'Request fields or types are invalid.',too_large:'Input exceeds the refiner limits.',unsupported_type:'This file type is not supported.',invalid_encoding:'Text must be valid UTF-8.',invalid_image:'Image data is malformed or unsupported.',image_too_large:'Image dimensions exceed the refiner limit.',unsafe_input:'The host refused this input.',route_unconfigured:'Configure the independent refiner provider and model.',route_changed:'The configured refiner changed. Prepare a new preview.',image_not_confirmed:"Confirm this route's image compatibility in plugin settings.",preview_required:'Prepare and inspect a new preview before sending.',busy:'The refiner has no available request slot.',request_conflict:'This request identity already names different content.',job_not_found:'This job is unavailable.',timeout:'The model request timed out. Its remote outcome may be unknown.',model_failed:'The model request failed.',invalid_output:'The model response did not match the required format.',service_unloaded:'The refiner service is no longer available.',internal_error:'The refiner could not complete this operation.'}
 const errorValid = e => closed(e,['code','message']) && typeof e.code === 'string' && Object.hasOwn(errors,e.code) && e.message === errors[e.code]
 const failureValid = r => closed(r,['ok','error']) && r.ok === false && errorValid(r.error)
 const limits = {max_files:8,max_images:3,max_text_file_bytes:65536,max_model_text_bytes:131072,max_image_bytes:1048576,max_image_pixels:4000000,max_rpc_bytes:6291456,max_candidate_bytes:32768,max_reply_bytes:16384,max_source_messages:40,max_turns:64,max_output_tokens:4096,max_running_jobs:2,max_retained_jobs:8,result_ttl_seconds:120}
-const describeValid = d => closed(d,['configured_route','image_eligibility','host_fallback_unresolved','model_timeout_seconds','compatibility_baseline','limits']) && (d.configured_route === null || labelsValid(d.configured_route)) && ['operator_confirmed','not_confirmed'].includes(d.image_eligibility) && d.host_fallback_unresolved === true && d.model_timeout_seconds === 90 && d.compatibility_baseline === '081e8d9b75b2bedae297a89232b04ef9be7b26a0' && closed(d.limits,Object.keys(limits)) && Object.entries(limits).every(([k,v])=>d.limits[k] === v)
+const describeValid = d => closed(d,['configured_route','image_eligibility','host_fallback_unresolved','model_timeout_seconds','compatibility_baseline','limits','configured_reasoning_effort','execution_support']) && (d.configured_reasoning_effort === null || efforts.has(d.configured_reasoning_effort)) && closed(d.execution_support,['model_override','reasoning_effort']) && Object.values(d.execution_support).every(value=>typeof value === 'boolean') && (d.configured_route === null || labelsValid(d.configured_route)) && ['operator_confirmed','not_confirmed'].includes(d.image_eligibility) && d.host_fallback_unresolved === true && d.model_timeout_seconds === 90 && d.compatibility_baseline === '081e8d9b75b2bedae297a89232b04ef9be7b26a0' && closed(d.limits,Object.keys(limits)) && Object.entries(limits).every(([k,v])=>d.limits[k] === v)
 const resultValid = r => closed(r,['assistant_reply','candidate_prompt','reported_route','usage','cost']) && safeText(r.assistant_reply,16384) && !!r.assistant_reply.trim() && (r.candidate_prompt === null || (safeText(r.candidate_prompt,32768) && !!r.candidate_prompt.trim())) && closed(r.reported_route,['provider','model']) && [r.reported_route.provider,r.reported_route.model].every(v=>v === null || labelValid(v)) && (r.usage === null || (closed(r.usage,['input_tokens','output_tokens','total_tokens','cache_read_tokens','cache_write_tokens']) && Object.values(r.usage).every(n=>Number.isSafeInteger(n) && n >= 0) && Object.values(r.usage).some(n=>n > 0))) && r.cost === null
 const statusValid = d => closed(d,['identity','state','result','error']) && (d.state === 'succeeded' ? resultValid(d.result) && d.error === null : d.state === 'failed' ? d.result === null && errorValid(d.error) : ['pending','abandoned'].includes(d.state) && d.result === null && d.error === null)
 const snapshotValue = value => { if (Array.isArray(value)) return Object.freeze(value.map(snapshotValue)); if (value && typeof value === 'object') return Object.freeze(Object.fromEntries(Object.entries(value).map(([k,v])=>[k,snapshotValue(v)]))); return value }
 const errorText = response => errorValid(response?.error) ? errors[response.error.code] : errors.internal_error
-const initial = () => ({ origin:null, refinementId:null, revision:0, candidateRevision:0, draft:'', userInput:'', candidate:'', selection:[], files:[], turns:[], prepared:null, routeInfo:null, job:null, proposal:null, error:null, message:null, opening:false })
+const initial = () => ({ origin:null, refinementId:null, revision:0, candidateRevision:0, draft:'', userInput:'', candidate:'', execution:{model_override:null,reasoning_effort:null}, selection:[], files:[], turns:[], prepared:null, routeInfo:null, job:null, proposal:null, error:null, message:null, opening:false })
 
 export function createController(dependencies) {
   const { captureOrigin, requestProfile, readSelectedFile, writeClipboard, queryClient: cache, newId, publish } = dependencies
-  let state = initial(), generation = 0, routeGeneration = 0, disposed = false
+  let state = initial(), generation = 0, routeGeneration = 0, disposed = false, effortSeeded = false
   const emit = patch => { state = snapshotValue({ ...state, ...patch }); publish(state); return state }
   const live = g => !disposed && g === generation
   const invalidate = patch => {
@@ -67,18 +70,25 @@ export function createController(dependencies) {
     void Promise.resolve(cache.cancelQueries({queryKey:key, exact:true})).then(() => cache.removeQueries({queryKey:key, exact:true}))
     void rpc(job.origin, 'release', {protocol_version:1, identity:job.identity, handle:job.handle}).catch(() => {})
   }
+  const effectiveRoute = () => state.execution.model_override || state.routeInfo?.configured_route || null
   async function refreshRoute() {
     if (!state.origin) return state
     const g = generation, origin = state.origin, routeRequest = ++routeGeneration
     try {
-      const result = await rpc(origin, 'describe', {protocol_version:1})
+      const result = await rpc(origin, 'describe', {protocol_version:2})
       if (!live(g) || routeRequest !== routeGeneration) return state
+      if (result?.error?.code === -32601) return emit({routeInfo:null, prepared:null, error:errors.incompatible_api})
       if (failureValid(result)) return emit({routeInfo:null, prepared:null, error:errorText(result)})
       const data = envelope(result)
       if (!describeValid(data)) return emit({routeInfo:null,prepared:null,error:'Invalid configured route response.'})
-      const changed = !sameLabels(state.routeInfo?.configured_route, data.configured_route)
-      return emit({routeInfo:data, prepared:changed ? null : state.prepared, error:data.configured_route ? null : 'Configure the independent refiner provider and model.'})
-    } catch { if (live(g) && routeRequest === routeGeneration) return emit({routeInfo:null, prepared:null, error:'Route unavailable. Reopen from the intended chat.'}); return state }
+      const changed = !sameLabels(state.routeInfo?.configured_route, data.configured_route) || state.routeInfo?.image_eligibility !== data.image_eligibility || JSON.stringify(state.routeInfo?.execution_support) !== JSON.stringify(data.execution_support)
+      let execution = state.execution
+      if (!effortSeeded) {
+        effortSeeded = true
+        if (data.execution_support.reasoning_effort) execution = {...execution, reasoning_effort:data.configured_reasoning_effort}
+      }
+      return emit({routeInfo:data, execution, prepared:changed || !sameExecution(execution,state.execution) ? null : state.prepared, error:(execution.model_override || data.configured_route) ? null : 'Configure the independent refiner provider and model.'})
+    } catch (error) { if (live(g) && routeRequest === routeGeneration) return emit({routeInfo:null, prepared:null, error:error?.code === -32601 ? errors.incompatible_api : 'Route unavailable. Reopen from the intended chat.'}); return state }
   }
   async function open() {
     if (disposed || state.opening) return state
@@ -89,7 +99,7 @@ export function createController(dependencies) {
       const origin = await captureOrigin()
       if (!live(g)) return state
       if (!origin?.route || typeof origin.draft !== 'string') return emit({opening:false, error:'Unable to capture the chat owner and draft. Reopen from the intended chat.'})
-      emit({origin, draft:origin.draft, refinementId:newId(), opening:false})
+      emit({origin, draft:'', userInput:origin.draft, refinementId:newId(), opening:false})
       return await refreshRoute()
     } catch { if (live(g)) return emit({opening:false, error:'Unable to capture the chat owner and draft. Reopen from the intended chat.'}); return state }
   }
@@ -99,6 +109,14 @@ export function createController(dependencies) {
     if (Object.hasOwn(values, 'draft')) patch.draft = values.draft
     if (Object.hasOwn(values, 'userInput')) patch.userInput = values.userInput
     return invalidate(patch)
+  }
+  function setExecution(values) {
+    if (!state.origin || !values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some(key=>!['model_override','reasoning_effort'].includes(key))) return emit({error:errors.invalid_params})
+    const execution = {...state.execution, ...values}
+    if (!executionValid(execution)) return emit({error:errors.invalid_params})
+    if ((execution.model_override !== null && !state.routeInfo?.execution_support.model_override) || (execution.reasoning_effort !== null && !state.routeInfo?.execution_support.reasoning_effort)) return emit({error:errors.incompatible_api})
+    if (sameExecution(execution,state.execution)) return state
+    return invalidate({execution})
   }
   async function setSelection(values) {
     if (!state.origin) return state
@@ -111,36 +129,38 @@ export function createController(dependencies) {
   }
   function editCandidate(text) { return invalidate({candidate:text, candidateRevision:state.candidateRevision + 1}) }
   async function prepare() {
-    if (!state.origin || state.job || !state.routeInfo?.configured_route) return emit({error:'Configure the independent refiner route before preparing.'})
-    const g = generation, revision = state.revision, route = state.routeInfo.configured_route
+    if (!state.origin || state.job || !state.routeInfo || !effectiveRoute()) return emit({error:'Configure the independent refiner route before preparing.'})
+    const g = generation, revision = state.revision, routeRequest = routeGeneration, route = effectiveRoute(), execution = state.execution
+    if ((execution.model_override !== null && !state.routeInfo.execution_support.model_override) || (execution.reasoning_effort !== null && !state.routeInfo.execution_support.reasoning_effort)) return emit({error:errors.incompatible_api})
     const input = {original_draft:state.draft, source_messages:state.selection, files:state.files, turns:state.turns, user_input:state.userInput, candidate_prompt:state.candidate || null}
     if (!inputValid(input,false)) return emit({error:'Input exceeds the refiner limits or is invalid.'})
-    if (input.files.some(file=>file.kind === 'image') && state.routeInfo.image_eligibility !== 'operator_confirmed') return emit({error:'Confirm this route’s image compatibility in plugin settings.'})
+    if (input.files.some(file=>file.kind === 'image') && (state.routeInfo.image_eligibility !== 'operator_confirmed' || !sameLabels(route,state.routeInfo.configured_route))) return emit({error:'Confirm this route’s image compatibility in plugin settings.'})
     emit({error:null, message:'Preparing preview…'})
     try {
-      const response = await rpc(state.origin, 'prepare', {protocol_version:1, input_revision:revision, expected_route:route, input})
-      if (!live(g) || revision !== state.revision || !sameLabels(state.routeInfo?.configured_route,route)) return state
+      const response = await rpc(state.origin, 'prepare', {protocol_version:2, input_revision:revision, expected_route:route, input, execution})
+      if (!live(g) || revision !== state.revision || routeRequest !== routeGeneration || !sameLabels(effectiveRoute(),route) || !sameExecution(state.execution,execution)) return state
+      if (response?.error?.code === -32601) return emit({prepared:null, message:null, error:errors.incompatible_api})
       if (failureValid(response)) return emit({prepared:null, message:null, error:errorText(response)})
       const data = envelope(response)
-      if (!closed(data,['input_revision','expected_route','prepared','preview_digest','redacted']) || data.input_revision !== revision || !labelsValid(data.expected_route) || !sameLabels(data.expected_route, route) || !inputValid(data.prepared,true) || typeof data.redacted !== 'boolean' || typeof data.preview_digest !== 'string' || !/^[0-9a-f]{64}$/.test(data.preview_digest)) return emit({prepared:null, message:null, error:'Invalid preview response.'})
+      if (!closed(data,['input_revision','expected_route','prepared','preview_digest','redacted','execution']) || !sameExecution(data.execution,execution) || data.input_revision !== revision || !labelsValid(data.expected_route) || !sameLabels(data.expected_route, route) || !inputValid(data.prepared,true) || typeof data.redacted !== 'boolean' || typeof data.preview_digest !== 'string' || !/^[0-9a-f]{64}$/.test(data.preview_digest)) return emit({prepared:null, message:null, error:'Invalid preview response.'})
       return emit({prepared:data, message:null})
-    } catch { if (live(g) && revision === state.revision) return emit({prepared:null, message:null, error:'Preview upload failed. Check the captured route.'}); return state }
+    } catch (error) { if (live(g) && revision === state.revision && routeRequest === routeGeneration && sameLabels(effectiveRoute(),route) && sameExecution(state.execution,execution)) return emit({prepared:null, message:null, error:error?.code === -32601 ? errors.incompatible_api : 'Preview upload failed. Check the captured route.'}); return state }
   }
   async function send() {
-    if (!state.origin || state.job || !state.prepared || state.prepared.input_revision !== state.revision || !sameLabels(state.prepared.expected_route,state.routeInfo?.configured_route)) return emit({error:'Prepare and inspect a new preview before sending.'})
-    const g = generation, revision = state.revision, prepared = state.prepared, origin = state.origin, candidateRevision = state.candidateRevision
+    if (!state.origin || state.job || !state.prepared || state.prepared.input_revision !== state.revision || !sameLabels(state.prepared.expected_route,effectiveRoute()) || !sameExecution(state.prepared.execution,state.execution)) return emit({error:'Prepare and inspect a new preview before sending.'})
+    const g = generation, revision = state.revision, routeRequest = routeGeneration, prepared = state.prepared, origin = state.origin, candidateRevision = state.candidateRevision
     const identity = {refinement_id:state.refinementId, request_id:newId(), input_revision:revision}
     const queryKey = keyFor(state, identity)
     emit({prepared:null, message:'Starting request…', error:null, job:{starting:true, origin, identity}})
     try {
-      const response = await rpc(origin, 'start', {protocol_version:1, identity, expected_route:prepared.expected_route, prepared:prepared.prepared, preview_digest:prepared.preview_digest})
-      if (failureValid(response)) { if (live(g)) return emit({job:null, message:null, error:errorText(response)}); return state }
+      const response = await rpc(origin, 'start', {protocol_version:2, identity, expected_route:prepared.expected_route, prepared:prepared.prepared, preview_digest:prepared.preview_digest, execution:prepared.execution})
+      if (response?.error?.code === -32601 || failureValid(response)) { if (live(g) && state.job?.identity.request_id === identity.request_id) return emit({job:null, message:null, error:response?.error?.code === -32601 ? errors.incompatible_api : errorText(response)}); return state }
       const data = envelope(response), handle = data.handle
       if (!closed(data,['identity','handle']) || !sameIdentity(data.identity,identity) || !closed(handle,['job_id','result_capability']) || typeof handle.job_id !== 'string' || !/^[0-9a-f]{32}$/.test(handle.job_id) || typeof handle.result_capability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(handle.result_capability)) throw new Error('invalid')
       const job = {origin, identity, handle, candidateRevision, queryKey, submittedInput:prepared.prepared.user_input}
-      if (!live(g)) { cleanJob(job); return state }
+      if (!live(g) || revision !== state.revision || routeRequest !== routeGeneration || !sameExecution(state.execution,prepared.execution) || !sameLabels(effectiveRoute(),prepared.expected_route)) { cleanJob(job); if (live(g) && state.job?.identity.request_id === identity.request_id) return emit({job:null,message:null}); return state }
       return emit({job, message:'Waiting for refiner…'})
-    } catch { if (live(g)) return emit({job:null, message:null, error:'Start acknowledgement was not received. The request may have run; a new attempt may incur model use.'}); return state }
+    } catch (error) { if (live(g) && state.job?.identity.request_id === identity.request_id) return emit({job:null, message:null, error:error?.code === -32601 ? errors.incompatible_api : 'Start acknowledgement was not received. The request may have run; a new attempt may incur model use.'}); return state }
   }
   function acceptStatus(response, identity) {
     const job = state.job
@@ -174,9 +194,9 @@ export function createController(dependencies) {
     try { const ok = await writeClipboard(candidate); if (live(g)) return emit(ok === true ? {message:'Copied prompt. Paste it and reattach any required files yourself.', error:null} : {error:'Clipboard unavailable. Select text manually.'}) } catch { if (live(g)) return emit({error:'Clipboard unavailable. Select text manually.'}) }
     return state
   }
-  function discard() { generation++; const job = state.job; state = snapshotValue(initial()); publish(state); cleanJob(job?.handle ? job : null); return state }
+  function discard() { generation++; effortSeeded = false; const job = state.job; state = snapshotValue(initial()); publish(state); cleanJob(job?.handle ? job : null); return state }
   function dispose() { if (disposed) return state; discard(); disposed = true; return state }
-  return {open, setInput, setSelection, editCandidate, prepare, send, acceptStatus, applyProposal, copy, discard, dispose, refreshRoute, getState:() => state}
+  return {open, setInput, setExecution, effectiveRoute, setSelection, editCandidate, prepare, send, acceptStatus, applyProposal, copy, discard, dispose, refreshRoute, getState:() => state}
 }
 
 function snapshot() {
@@ -370,7 +390,7 @@ export default {
       const current = useValue(metadata), ready = !!current.routes && current.epoch === gatewayActivationEpoch()
       return jsxs('div',{children:[jsx(Button,{type:'button',disabled:!ready,onClick:()=>{ if (!metadata.get().routes || metadata.get().epoch !== gatewayActivationEpoch()) { void refreshMetadata(); return } if (typeof host.revealPane !== 'function') { host.notify({kind:'error',message:'Required Hermes pane API is unavailable.'}); return } void controller.open(); host.revealPane('prompt-refiner:pane') },children:'Refine'}),!ready && jsx(Button,{type:'button',disabled:current.loading,onClick:()=>void refreshMetadata(),children:current.loading ? 'Loading routes…' : 'Retry routes'})]})
     }
-    ctx.register({id:'pane',area:'panes',title:'Prompt refiner',data:{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'360px'},render:()=>jsx(Panel,{controller,store,ctx})})
+    ctx.register({id:'pane',area:'panes',title:'Prompt refiner',data:{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'560px'},render:()=>jsx(Panel,{controller,store,ctx})})
     ctx.register({id:'refine',area:COMPOSER_AREAS.actions,render:()=>jsx(Action,{})})
     ctx.onDispose(()=>{ disposed = true; metadataGeneration++; controller.dispose() })
     void refreshMetadata()

@@ -9,10 +9,11 @@ const golden = {
   input_revision:2,
   expected_route:{provider:'openai-codex',model:'fixture-model'},
   prepared:{original_draft:'Bitte erkläre ./build.sh; nicht ausführen.',source_messages:[{id:'11111111-1111-4111-8111-111111111111',role:'user',sequence:0,truncated:false,text:'Nur erklären.'}],files:[{id:'22222222-2222-4222-8222-222222222222',kind:'text',name:'notes.txt',text:'Keine Builds.\n'}],turns:[{role:'user',text:'Deutsch bitte.'},{role:'assistant',text:'Gern.'}],user_input:'Formuliere die Anfrage präzise.',candidate_prompt:null},
-  preview_digest:'79889f9889d6f4310b7bf53af6ca468ab1fd6e9b2f4a870d816938fb5acb7e99'
+  execution:{model_override:null,reasoning_effort:'high'},
+  preview_digest:'58402625bca5f2a17cb3b9caa7f77e106ede1b42d1031fb25a09fd54b6d8a13a'
 }
 const plain = value => JSON.parse(JSON.stringify(value))
-const description = {configured_route:golden.expected_route,image_eligibility:'not_confirmed',host_fallback_unresolved:true,model_timeout_seconds:90,compatibility_baseline:'081e8d9b75b2bedae297a89232b04ef9be7b26a0',limits:{max_files:8,max_images:3,max_text_file_bytes:65536,max_model_text_bytes:131072,max_image_bytes:1048576,max_image_pixels:4000000,max_rpc_bytes:6291456,max_candidate_bytes:32768,max_reply_bytes:16384,max_source_messages:40,max_turns:64,max_output_tokens:4096,max_running_jobs:2,max_retained_jobs:8,result_ttl_seconds:120}}
+const description = {configured_route:golden.expected_route,configured_reasoning_effort:'high',execution_support:{model_override:true,reasoning_effort:true},image_eligibility:'not_confirmed',host_fallback_unresolved:true,model_timeout_seconds:90,compatibility_baseline:'081e8d9b75b2bedae297a89232b04ef9be7b26a0',limits:{max_files:8,max_images:3,max_text_file_bytes:65536,max_model_text_bytes:131072,max_image_bytes:1048576,max_image_pixels:4000000,max_rpc_bytes:6291456,max_candidate_bytes:32768,max_reply_bytes:16384,max_source_messages:40,max_turns:64,max_output_tokens:4096,max_running_jobs:2,max_retained_jobs:8,result_ttl_seconds:120}}
 const deferred = () => { let resolve; const promise = new Promise(r => {resolve=r}); return {promise,resolve} }
 function makeAtom(value) { const listeners = new Set(); return {get:()=>value,set:v=>{value=v;for(const fn of listeners)fn(value)},listen:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}} }
 async function load() {
@@ -44,7 +45,7 @@ function fixture(mod, overrides={}) {
   let current, n=0
   const calls=[], copies=[], removals=[], cancellations=[]
   const route={connectionId:'conn',profile:'profile',targetProfile:'target'}
-  const deps = {captureOrigin:async()=>({route,storedId:null,runtimeId:null,draft:''}),requestProfile:async(r,m,p)=>{calls.push({route:r,method:m,params:plain(p)});if(m.endsWith('describe')) return {ok:true,data:description};if(m.endsWith('prepare'))return {ok:true,data:{...golden,redacted:false}};if(m.endsWith('start'))return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}};return {ok:true,data:{released:true,abandoned:false}}},readSelectedFile:async x=>x,writeClipboard:async value=>{copies.push(value);return true},queryClient:{cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))},newId:()=>`00000000-0000-4000-8000-${String(++n).padStart(12,'0')}`,publish:s=>{current=s},...overrides}
+  const deps = {captureOrigin:async()=>({route,storedId:null,runtimeId:null,draft:''}),requestProfile:async(r,m,p)=>{calls.push({route:r,method:m,params:plain(p)});if(m.endsWith('describe')) return {ok:true,data:description};if(m.endsWith('prepare'))return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}};if(m.endsWith('start'))return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}};return {ok:true,data:{released:true,abandoned:false}}},readSelectedFile:async x=>x,writeClipboard:async value=>{copies.push(value);return true},queryClient:{cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))},newId:()=>`00000000-0000-4000-8000-${String(++n).padStart(12,'0')}`,publish:s=>{current=s},...overrides}
   const controller=mod.namespace.createController(deps)
   return {controller,calls,copies,removals,cancellations,get state(){return current}}
 }
@@ -80,8 +81,22 @@ test('prepare and send are distinct; golden prepared payload and digest are forw
   assert.equal(start.params.identity.input_revision,2)
   assert.deepEqual(start.params.expected_route,golden.expected_route)
   assert.deepEqual(start.params.prepared,golden.prepared)
+  assert.deepEqual(start.params.execution,golden.execution)
+  assert.equal(start.params.protocol_version,2);assert.equal(f.calls[0].params.protocol_version,2)
   assert.equal(start.params.preview_digest,golden.preview_digest)
   assert.equal(JSON.stringify(f.state.job.queryKey).includes('A'.repeat(43)),false)
+})
+
+test('session execution is sent in v2 and invalidates a preview',async()=>{
+  const f=fixture((await load()).mod),c=f.controller
+  await c.open();c.setInput({userInput:'question'});c.setExecution({model_override:{provider:'trusted',model:'model'},reasoning_effort:'low'})
+  await c.prepare();const prepare=f.calls.at(-1)
+  assert.equal(prepare.params.protocol_version,2);assert.deepEqual(prepare.params.execution,{model_override:{provider:'trusted',model:'model'},reasoning_effort:'low'})
+  assert.deepEqual(prepare.params.expected_route,{provider:'trusted',model:'model'})
+  c.setExecution({reasoning_effort:'high'});assert.equal(f.state.prepared,null)
+  await c.prepare();await c.send();const start=f.calls.at(-1)
+  assert.equal(start.params.protocol_version,2);assert.deepEqual(start.params.execution,{model_override:{provider:'trusted',model:'model'},reasoning_effort:'high'})
+  assert.deepEqual(start.params.expected_route,{provider:'trusted',model:'model'})
 })
 
 test('candidate edits survive late proposal; copy is explicit and acknowledgement checked',async()=>{
@@ -116,7 +131,7 @@ test('production panel creates a live status query with captured route and closu
   const f=await load(), handle={job_id:'a'.repeat(32),result_capability:'Z'.repeat(43)}
   f.setRequest(async (route,method,params)=>{
     if(method.endsWith('describe')) return {ok:true,data:description}
-    if(method.endsWith('prepare')) return {ok:true,data:{...golden,redacted:false}}
+    if(method.endsWith('prepare')) return {ok:true,data:{...golden,input_revision:params.input_revision,expected_route:params.expected_route,execution:params.execution,redacted:false}}
     if(method.endsWith('start')) return {ok:true,data:{identity:params.identity,handle}}
     if(method.endsWith('status')) return {ok:true,data:{identity:params.identity,state:'pending',result:null,error:null}}
     return {ok:true,data:{released:true,abandoned:false}}
@@ -152,7 +167,7 @@ test('discard while start is in flight releases a later acknowledged job',async(
   const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>{
     calls.push(m)
     if(m.endsWith('describe'))return {ok:true,data:description}
-    if(m.endsWith('prepare'))return {ok:true,data:{...golden,redacted:false}}
+    if(m.endsWith('prepare'))return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}
     if(m.endsWith('start'))return wait.promise.then(()=>({ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}))
     return {ok:true,data:{released:false,abandoned:true}}
   }})
@@ -178,7 +193,7 @@ const click = (f,label) => nodes(f.render()).find(n=>n.props?.children===label).
 test('native pane is docked beside chat and revealed only by the action',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick()
   const pane=f.contributions.find(c=>c.area==='panes')
-  assert.deepEqual(plain(pane.data),{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'360px'})
+  assert.deepEqual(plain(pane.data),{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'560px'})
   assert.deepEqual(f.reveals,[])
   actionButton(f).props.onClick()
   assert.deepEqual(f.reveals,['prompt-refiner:pane'])
@@ -335,7 +350,7 @@ for (const [code,message] of [['job_not_found','This job is unavailable.'],['ser
     const f=fixture((await load()).mod,{requestProfile:async(route,method,params)=>{
       calls.push({method,params:plain(params)})
       if (method.endsWith('describe')) return {ok:true,data:description}
-      if (method.endsWith('prepare')) return {ok:true,data:{...golden,input_revision:params.input_revision,redacted:false}}
+      if (method.endsWith('prepare')) return {ok:true,data:{...golden,input_revision:params.input_revision,expected_route:params.expected_route,execution:params.execution,redacted:false}}
       if (method.endsWith('start')) return {ok:true,data:{identity:params.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}
       return {ok:false,error:{code,message}}
     }}),c=f.controller
@@ -353,3 +368,91 @@ for (const [code,message] of [['job_not_found','This job is unavailable.'],['ser
     assert.ok(f.state.job);assert.equal(calls.filter(call=>call.method.endsWith('start')).length,2)
   })
 }
+
+
+test('stored draft prepopulates visible input without a hidden original draft',async()=>{
+  const route={connectionId:'c',profile:'p',targetProfile:'t'}
+  const f=fixture((await load()).mod,{captureOrigin:async()=>({route,storedId:'stored',draft:'captured text'})}),c=f.controller
+  await c.open();assert.equal(f.state.userInput,'captured text');assert.equal(f.state.draft,'')
+  c.setInput({userInput:'revised text'});await c.prepare()
+  const input=f.calls.at(-1).params.input
+  assert.equal(input.original_draft,'');assert.equal(input.user_input,'revised text')
+})
+
+test('refresh preserves session edits, discard resets and reseeds without setting RPCs',async()=>{
+  const f=fixture((await load()).mod),c=f.controller
+  await c.open();assert.equal(f.state.execution.reasoning_effort,'high')
+  c.setExecution({reasoning_effort:'low',model_override:{provider:'p',model:'m'}})
+  await c.refreshRoute();assert.deepEqual(plain(f.state.execution),{model_override:{provider:'p',model:'m'},reasoning_effort:'low'})
+  c.discard();assert.deepEqual(plain(f.state.execution),{model_override:null,reasoning_effort:null})
+  await c.open();assert.deepEqual(plain(f.state.execution),{model_override:null,reasoning_effort:'high'})
+  assert.deepEqual(f.calls.map(call=>call.method),Array(3).fill('plugin.prompt-refiner.describe'))
+})
+
+test('unknown effort stays null and unsupported execution APIs are refused',async()=>{
+  const unsupported={...description,configured_reasoning_effort:null,execution_support:{model_override:false,reasoning_effort:false}}
+  const f=fixture((await load()).mod,{requestProfile:async()=>({ok:true,data:unsupported})}),c=f.controller
+  await c.open();assert.equal(f.state.execution.reasoning_effort,null)
+  c.setExecution({reasoning_effort:'low'});assert.equal(f.state.error,'Required Hermes plugin API is unavailable.');assert.equal(f.state.execution.reasoning_effort,null)
+  c.setExecution({model_override:{provider:'p',model:'m'}});assert.equal(f.state.execution.model_override,null)
+  c.setExecution({reasoning_effort:'default'});assert.equal(f.state.error,'Request fields or types are invalid.')
+  const g=fixture((await load()).mod,{requestProfile:async()=>({ok:true,data:{...unsupported,configured_reasoning_effort:'high'}})})
+  await g.controller.open();assert.equal(g.state.execution.reasoning_effort,null)
+})
+
+test('trusted override supplies missing configured route but cannot borrow image attestation',async()=>{
+  const calls=[],desc={...description,configured_route:null,image_eligibility:'operator_confirmed'}
+  const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>{calls.push({m,p:plain(p)});return m.endsWith('describe')?{ok:true,data:desc}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}}}),c=f.controller
+  await c.open();c.setExecution({model_override:{provider:'p',model:'m'}});c.setInput({userInput:'x'});await c.prepare()
+  assert.deepEqual(calls.at(-1).p.expected_route,{provider:'p',model:'m'});assert.ok(f.state.prepared)
+  await c.setSelection({files:[{id:'22222222-2222-4222-8222-222222222222',kind:'image',name:'x.png',mime:'image/png',data_base64:'AA=='}]});const count=calls.length
+  await c.prepare();assert.equal(calls.length,count);assert.match(f.state.error,/image compatibility/)
+})
+
+test('execution validation rejects extra fields, whitespace and changed preview echo',async()=>{
+  const f=fixture((await load()).mod),c=f.controller;await c.open()
+  for(const values of [{unexpected:1},{model_override:{provider:' p',model:'m'}},{reasoning_effort:'HIGH'},{model_override:{provider:'p',model:'m',extra:1}}]) {c.setExecution(values);assert.equal(f.state.error,'Request fields or types are invalid.')}
+  let responseExecution={model_override:null,reasoning_effort:'low'}
+  const g=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:responseExecution,redacted:false}}})
+  await g.controller.open();g.controller.setInput({userInput:'x'});await g.controller.prepare();assert.equal(g.state.prepared,null);assert.equal(g.state.error,'Invalid preview response.')
+  responseExecution={model_override:null,reasoning_effort:'high',extra:true};await g.controller.prepare();assert.equal(g.state.prepared,null)
+})
+
+test('route refresh and execution edits fence pending preview adoption',async()=>{
+  const waiting=deferred();let desc=description
+  const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:desc}:waiting.promise}),c=f.controller
+  await c.open();c.setInput({userInput:'x'});const pending=c.prepare();c.setExecution({reasoning_effort:'low'})
+  waiting.resolve({ok:true,data:{...golden,input_revision:1,redacted:false}});await pending;assert.equal(f.state.prepared,null)
+  const waiting2=deferred();const g=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:desc}:waiting2.promise})
+  await g.controller.open();g.controller.setInput({userInput:'x'});const pending2=g.controller.prepare();desc={...description,execution_support:{model_override:false,reasoning_effort:false}};await g.controller.refreshRoute()
+  waiting2.resolve({ok:true,data:{...golden,input_revision:1,redacted:false}});await pending2;assert.equal(g.state.prepared,null)
+})
+
+test('unsupported RPC is distinguished without exposing backend messages',async()=>{
+  for(const [problem,expected] of [[{code:-32601,message:'secret'},'Required Hermes plugin API is unavailable.'],[{code:-32000,message:'secret'},'Route unavailable. Reopen from the intended chat.']]){
+    const f=fixture((await load()).mod,{requestProfile:async()=>{throw problem}});await f.controller.open();assert.equal(f.state.error,expected);assert.equal(f.state.error.includes('secret'),false)
+  }
+  const f=fixture((await load()).mod,{requestProfile:async()=>({error:{code:-32601,message:'secret'}})});await f.controller.open();assert.equal(f.state.error,'Required Hermes plugin API is unavailable.')
+})
+
+test('model override denial uses the safe mapped error',async()=>{
+  const f=fixture((await load()).mod,{requestProfile:async(r,m)=>m.endsWith('describe')?{ok:true,data:description}:{ok:false,error:{code:'override_denied',message:'The host does not permit this model override.'}}})
+  await f.controller.open();f.controller.setInput({userInput:'x'});await f.controller.prepare();assert.equal(f.state.error,'The host does not permit this model override.')
+})
+
+
+test('model change invalidates preview and refresh withdraws image attestation',async()=>{
+  let desc={...description,image_eligibility:'operator_confirmed'}
+  const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>m.endsWith('describe')?{ok:true,data:desc}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}}),c=f.controller
+  await c.open();c.setInput({userInput:'x'});await c.prepare();assert.ok(f.state.prepared)
+  c.setExecution({model_override:{provider:'p',model:'m'}});assert.equal(f.state.prepared,null)
+  c.setExecution({model_override:null});await c.prepare();assert.ok(f.state.prepared)
+  desc={...desc,image_eligibility:'not_confirmed'};await c.refreshRoute();assert.equal(f.state.prepared,null)
+})
+
+test('start acknowledgement after execution edit releases the job and cannot be adopted',async()=>{
+  const waiting=deferred(),calls=[]
+  const f=fixture((await load()).mod,{requestProfile:async(r,m,p)=>{calls.push(m);if(m.endsWith('describe'))return {ok:true,data:description};if(m.endsWith('prepare'))return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}};if(m.endsWith('start')){await waiting.promise;return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}};return {ok:true,data:{released:true,abandoned:false}}}}),c=f.controller
+  await c.open();c.setInput({userInput:'x'});await c.prepare();const sending=c.send();c.setExecution({reasoning_effort:'low'});waiting.resolve();await sending;await tick()
+  assert.equal(f.state.job,null);assert.ok(calls.includes('plugin.prompt-refiner.release'))
+})
