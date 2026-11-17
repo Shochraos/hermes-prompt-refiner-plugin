@@ -665,6 +665,7 @@ test('captured multiline grows and manual size resets only on completed send',as
   f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();f.enableEffects()
   let all=nodes(f.render()),input=all.find(n=>n.props?.['aria-label']==='Message the refiner');input.props.ref.current={style:{},scrollHeight:80};f.flushEffects()
+  assert.equal(input.props.ref.current.style.height,'80px')
   all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Resize message input').props['aria-valuenow'],80)
   all.find(n=>n.props?.['aria-label']==='Resize message input').props.onKeyDown({key:'End',preventDefault(){}});typeMessage(f,'edited');f.flushEffects();all=nodes(f.render());assert.equal(all.find(n=>n.props?.['aria-label']==='Resize message input').props['aria-valuenow'],160)
   const controller=f.contributions[0].render().props.controller;await controller.prepare();await controller.send();const identity=controller.getState().job.identity
