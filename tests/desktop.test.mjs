@@ -508,6 +508,7 @@ test('review displays readable content and distinct consent without raw metadata
   const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'my message');review(f)
   let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='my message'));assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('Send to refiner sends it to a model provider')))
+  assert.ok(all.some(n=>n.props?.children==='Hermes may send selected content to another provider or model, regardless of the selection shown. Images are not redacted.'))
   click(f,'Prepare preview');await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children===golden.prepared.user_input));assert.ok(all.some(n=>n.props?.children==='Keine Builds.\n'));assert.ok(all.some(n=>n.props?.children==='Send to refiner'))
   const visible=all.map(n=>typeof n.props?.children==='string'?n.props.children:'').join(' ');assert.doesNotMatch(visible,/Captured owner|atomic owner|"user_input"|preview_digest/)
   const discard=all.find(n=>n.props?.['aria-label']==='Discard refinement');assert.equal(discard.props.variant,'ghost');assert.equal(discard.props.size,'icon-xs');assert.equal(discard.props.children.type.name,'Codicon')

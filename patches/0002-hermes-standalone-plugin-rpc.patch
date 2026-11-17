@@ -32,7 +32,7 @@
 +        handler_params = {key: value for key, value in params.items() if key != "profile"}
 +        result = resolve_plugin_command_result(handler(handler_params, session_id=params.get("session_id") or None))
 +        return _ok(rid, json.loads(json.dumps(result, allow_nan=False)))
-+    except Exception:
++    except (Exception, SystemExit):
 +        logger.warning("standalone plugin RPC failed")
 +        return _err(rid, -32000, "plugin RPC failed")
 +

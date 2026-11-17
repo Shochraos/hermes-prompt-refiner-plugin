@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const prefix = 'plugin.prompt-refiner.'
-const warning = 'Hermes may use a fallback model. Images are not redacted.'
+const warning = 'Hermes may send selected content to another provider or model, regardless of the selection shown. Images are not redacted.'
 const textExtensions = new Set('txt md rst csv tsv json yaml yml toml ini xml html css scss js jsx ts tsx py sh bash nix c h cpp hpp rs go java sql log'.split(' '))
 const imageExtensions = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' }
 const byteLength = value => new TextEncoder().encode(value).length

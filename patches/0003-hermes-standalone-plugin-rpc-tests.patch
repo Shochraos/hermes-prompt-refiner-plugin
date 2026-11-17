@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/tests/tui_gateway/test_standalone_plugin_rpc.py
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,132 @@
 +import json
 +import os
 +from pathlib import Path
@@ -34,10 +34,16 @@
 +        raise ValueError("fixture-secret-sentinel")
 +    def nonjson(params, *, session_id):
 +        return {"value": object()}
++    def exit_sync(params, *, session_id):
++        raise SystemExit("fixture-secret-sentinel")
++    async def exit_async(params, *, session_id):
++        raise SystemExit("fixture-secret-sentinel")
 +    ctx.register_rpc("sync", sync)
 +    ctx.register_rpc("async", async_handler)
 +    ctx.register_rpc("fail", fail)
 +    ctx.register_rpc("nonjson", nonjson)
++    ctx.register_rpc("exit_sync", exit_sync)
++    ctx.register_rpc("exit_async", exit_async)
 +''')
 +        (path / "config.yaml").write_text("plugins:\n  enabled: [fixture]\n")
 +        (path / ".env").write_text("REFINER_FIXTURE_SCOPE_PROBE=" + ("launch-fixture" if path == home else "other-fixture") + "\n")
@@ -105,3 +111,25 @@
 +    assert server.dispatch({"id": 2, "method": "plugin.fixture.sync", "params": {}}, transport) is None
 +    assert transport.done.wait(10)
 +    assert transport.response["result"]["home"] == str(plugin_homes[0])
++
++
++@pytest.mark.parametrize("method", ["exit_sync", "exit_async"])
++def test_plugin_rpc_system_exit_is_sanitized(plugin_homes, caplog, method):
++    from tui_gateway import server
++    response = request("plugin.fixture." + method)
++    assert response["error"] == {"code": -32000, "message": "plugin RPC failed"}
++
++    class Transport:
++        def __init__(self):
++            self.done = Event()
++            self.response = None
++        def write(self, response):
++            self.response = response
++            self.done.set()
++
++    transport = Transport()
++    assert server.dispatch({"id": 3, "method": "plugin.fixture." + method, "params": {}}, transport) is None
++    assert transport.done.wait(10)
++    assert transport.response["error"] == {"code": -32000, "message": "plugin RPC failed"}
++    assert "fixture-secret-sentinel" not in json.dumps(transport.response)
++    assert "fixture-secret-sentinel" not in caplog.text
