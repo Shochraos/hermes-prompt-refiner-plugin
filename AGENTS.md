@@ -2,9 +2,9 @@
 
 ## Scope and structure
 
-The implementation contract is `docs/designs/prompt-refiner.md`. `discussion_summary.md` records accepted context; older review reports and `design_draft.md` are historical evidence, not current requirements. Read `IDEA.md` in full if present.
+Read `IDEA.md` in full if present. It is local context and must remain ignored.
 
-The directory plugin contains `plugin.yaml`, `__init__.py`, `refiner.py` and `desktop/plugin.js`. Backend tests use standard-library unittest; Desktop tests use Node's built-in runner. Keep production changes within the design's file boundary.
+The directory plugin contains `plugin.yaml`, `__init__.py`, `refiner.py` and `desktop/plugin.js`. Backend tests use standard-library unittest; Desktop tests use Node's built-in runner.
 
 ## Environment and verification
 
@@ -19,3 +19,5 @@ Prefer simple Python and uncompiled ESM; operational scripts are Bash. Add no de
 ## Git and collaboration
 
 Verify repository root, branch and HEAD before edits. Preserve unrelated work and staging. Workers own only their assigned files and do not commit or push. The coordinator inspects exact staged diffs and makes focused commits at verified checkpoints; final independent review covers the integrated change series. No push, merge or history rewriting without explicit scope.
+
+Keep internal workflow state, design drafts, review reports and source snapshots outside this repository. Delete them when their workflow is finished. Never stage, commit or push them. Only public documentation and contributor guidance belong in the source tree.

@@ -23,8 +23,8 @@ Discard clears the temporary refinement state; hiding the pane preserves it. Clo
 
 ## Architecture
 
-A Desktop pane holds the temporary conversation and selected snapshots. An owner-routed backend validates and redacts prepared input and runs a bounded, tool-free auxiliary model job. The user reviews the result and controls the copy-only handoff. The design and compatibility boundaries are documented in [the implementation plan](docs/designs/prompt-refiner.md).
+A Desktop pane holds the temporary conversation and selected snapshots. An owner-routed backend validates and redacts prepared input and runs a bounded, tool-free auxiliary model job. The user reviews the result and controls the copy-only handoff.
 
 ## License
 
-The project's original code is released under the [Unlicense](UNLICENSE). Preserved third-party source and evidence retain their own terms and are not included in the plugin payload.
+The project's code is released under the [Unlicense](UNLICENSE).

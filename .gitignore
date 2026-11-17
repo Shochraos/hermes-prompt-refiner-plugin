@@ -13,3 +13,14 @@ venv/
 htmlcov/
 .pytest_cache/
 /verification/
+IDEA.md
+/.agent-workflows/
+/workflow_*.json
+/review_*.json
+/resolution_*.json
+/*_report.md
+/design_draft.md
+/discussion_summary.md
+/review-sources/
+/resolution-sources/
+/docs/designs/
