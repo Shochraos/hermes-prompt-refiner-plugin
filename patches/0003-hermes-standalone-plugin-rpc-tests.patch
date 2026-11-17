@@ -1,0 +1,135 @@
+--- /dev/null
++++ b/tests/tui_gateway/test_standalone_plugin_rpc.py
+@@ -0,0 +1,132 @@
++import json
++import os
++from pathlib import Path
++from threading import Event
++
++import pytest
++
++
++@pytest.fixture
++def plugin_homes(tmp_path, monkeypatch):
++    from hermes_cli import plugins
++    from tui_gateway import server
++
++    plugins._reset_plugin_managers_for_tests()
++    monkeypatch.setattr(Path, "home", lambda: tmp_path)
++    home = tmp_path / ".hermes"
++    other = home / "profiles" / "other"
++    for path in (home, other):
++        plugin = path / "plugins" / "fixture"
++        plugin.mkdir(parents=True)
++        (plugin / "plugin.yaml").write_text('name: fixture\nversion: "1.0"\n')
++        (plugin / "__init__.py").write_text('''
++from hermes_constants import get_hermes_home
++from agent.secret_scope import get_secret
++def register(ctx):
++    def sync(params, *, session_id):
++        return {"home": str(get_hermes_home()), "params": params, "session_id": session_id, "scope_probe": get_secret("REFINER_FIXTURE_SCOPE_PROBE")}
++    async def async_handler(params, *, session_id):
++        return sync(params, session_id=session_id)
++    def fail(params, *, session_id):
++        raise ValueError("fixture-secret-sentinel")
++    def nonjson(params, *, session_id):
++        return {"value": object()}
++    def exit_sync(params, *, session_id):
++        raise SystemExit("fixture-secret-sentinel")
++    async def exit_async(params, *, session_id):
++        raise SystemExit("fixture-secret-sentinel")
++    ctx.register_rpc("sync", sync)
++    ctx.register_rpc("async", async_handler)
++    ctx.register_rpc("fail", fail)
++    ctx.register_rpc("nonjson", nonjson)
++    ctx.register_rpc("exit_sync", exit_sync)
++    ctx.register_rpc("exit_async", exit_async)
++''')
++        (path / "config.yaml").write_text("plugins:\n  enabled: [fixture]\n")
++        (path / ".env").write_text("REFINER_FIXTURE_SCOPE_PROBE=" + ("launch-fixture" if path == home else "other-fixture") + "\n")
++    monkeypatch.setenv("HOME", str(tmp_path))
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(tmp_path / "empty"))
++    monkeypatch.setattr(server, "_hermes_home", str(home))
++    before = dict(os.environ)
++    yield home, other, before
++    plugins._reset_plugin_managers_for_tests()
++
++
++def request(method, params=None):
++    from tui_gateway import server
++    return server.handle_request({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
++
++
++def test_plugin_rpc_profile_scoping_and_errors(plugin_homes):
++    home, other, _ = plugin_homes
++    before = dict(os.environ)
++    for method, profile, expected in [("sync", None, home), ("async", "other", other), ("sync", None, home)]:
++        params = {"value": 42, "session_id": "fixture-session"}
++        if profile:
++            params["profile"] = profile
++        result = request("plugin.fixture." + method, params)["result"]
++        assert result == {"home": str(expected), "params": {"value": 42, "session_id": "fixture-session"}, "session_id": "fixture-session", "scope_probe": "launch-fixture" if expected == home else "other-fixture"}
++    assert dict(os.environ) == before
++    from hermes_cli import plugins
++    from tui_gateway import server
++    server._sessions["owned-fixture-session"] = {"profile_home": str(other)}
++    try:
++        scoped = request("plugin.fixture.sync", {"session_id": "owned-fixture-session"})
++        assert scoped["result"]["home"] == str(other)
++    finally:
++        del server._sessions["owned-fixture-session"]
++    assert request("plugin.fixture.missing")["error"]["code"] == -32601
++    assert request("plugin.fixture.sync", {"profile": "nonexistent"})["error"]["code"] == 4064
++    assert "error" in request("plugin.fixture.sync", {"profile": []})
++    assert "error" in request("plugin.fixture.sync", {"profile": "../escape"})
++    assert "error" in request("plugin.fixture.sync", {"session_id": []})
++    for method in ("fail", "nonjson"):
++        response = request("plugin.fixture." + method)
++        assert "error" in response
++        assert "fixture-secret-sentinel" not in json.dumps(response)
++    assert "result" in request("ping")
++    server._methods["plugin.fixture.sync"] = lambda rid, params: server._ok(rid, {"core": True})
++    try:
++        assert request("plugin.fixture.sync")["result"] == {"core": True}
++    finally:
++        del server._methods["plugin.fixture.sync"]
++    plugins.get_plugin_manager().unload("fixture")
++    assert request("plugin.fixture.sync")["error"]["code"] == -32601
++
++
++def test_plugin_rpc_dispatch_uses_worker(plugin_homes):
++    from tui_gateway import server
++    class Transport:
++        def __init__(self):
++            self.done = Event()
++            self.response = None
++        def write(self, response):
++            self.response = response
++            self.done.set()
++    transport = Transport()
++    assert server.dispatch({"id": 2, "method": "plugin.fixture.sync", "params": {}}, transport) is None
++    assert transport.done.wait(10)
++    assert transport.response["result"]["home"] == str(plugin_homes[0])
++
++
++@pytest.mark.parametrize("method", ["exit_sync", "exit_async"])
++def test_plugin_rpc_system_exit_is_sanitized(plugin_homes, caplog, method):
++    from tui_gateway import server
++    response = request("plugin.fixture." + method)
++    assert response["error"] == {"code": -32000, "message": "plugin RPC failed"}
++
++    class Transport:
++        def __init__(self):
++            self.done = Event()
++            self.response = None
++        def write(self, response):
++            self.response = response
++            self.done.set()
++
++    transport = Transport()
++    assert server.dispatch({"id": 3, "method": "plugin.fixture." + method, "params": {}}, transport) is None
++    assert transport.done.wait(10)
++    assert transport.response["error"] == {"code": -32000, "message": "plugin RPC failed"}
++    assert "fixture-secret-sentinel" not in json.dumps(transport.response)
++    assert "fixture-secret-sentinel" not in caplog.text

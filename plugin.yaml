@@ -1,6 +1,6 @@
 name: prompt-refiner
 version: 0.1.0
-description: Optional conversational prompt refinement
+description: Gateway counterpart for Prompt Refiner (Desktop)
 author: Shochraos
 license: Unlicense
 python_dependencies:

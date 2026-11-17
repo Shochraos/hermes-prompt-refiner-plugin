@@ -17,13 +17,14 @@ const description = {configured_route:golden.expected_route,configured_reasoning
 const deferred = () => { let resolve; const promise = new Promise(r => {resolve=r}); return {promise,resolve} }
 function makeAtom(value) { const listeners = new Set(); return {get:()=>value,set:v=>{value=v;for(const fn of listeners)fn(value)},listen:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}} }
 async function load({selectionOnly = true, oldSdk = false} = {}) {
-  const options = [], contributions = [], requests = [], disposers = [], removals = [], cancellations = [], navigations = [], reveals = [], composerWrites = []
+  const options = [], contributions = [{area:'workspace'}], requests = [], disposers = [], removals = [], cancellations = [], navigations = [], reveals = [], composerWrites = [], workspaces = [], notices = []
   const route = {connectionId:'conn',mode:'remote',profile:'profile',targetProfile:'target'}
   const state = {focusedSessionOwner:makeAtom({connectionId:'conn',profile:'profile'}),focusedStoredSessionId:makeAtom(null),focusedSessionId:makeAtom(null)}
   let catalogData = {providers:[{slug:'openai-codex',name:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:true}}}]}, epoch = 1, draft = async () => 'stored draft', routes = async () => [route], request = async () => ({ok:true,data:description})
-  const host = {state,composer:{getDraft:id=>draft(id),setDraft:(...args)=>composerWrites.push(args)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},revealPane:id=>reveals.push(id),navigate:path=>navigations.push(path),notify:()=>{}}
+  const host = {state,composer:{getDraft:id=>draft(id),setDraft:(...args)=>composerWrites.push(args)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},openWorkspace:(id,options)=>{const workspace={id,...options,closed:false};workspaces.push(workspace);contributions[0]=workspace;return ()=>{workspace.closed=true;options.onClose()}},revealPane:id=>reveals.push(id),navigate:path=>navigations.push(path),notify:notice=>notices.push(notice)}
   const cache = {cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))}
   const sdk = {atom:makeAtom,useValue:a=>a.get(),useQuery:o=>{options.push(o);return o.queryKey[1]==='model-options'?{data:catalogData}:{}},queryClient:cache,host,gatewayActivationEpoch:()=>epoch,COMPOSER_AREAS:{actions:'composer.actions'},Button:function Button(){},Textarea:function Textarea(){},Checkbox:function Checkbox(){},DropdownMenu:function DropdownMenu(){},DropdownMenuTrigger:function DropdownMenuTrigger(){},DropdownMenuContent:function DropdownMenuContent(){},DropdownMenuItem:function DropdownMenuItem(){},Dialog:function Dialog(){},DialogContent:function DialogContent(){},DialogTitle:function DialogTitle(){},ModelCatalogMenu:function ModelCatalogMenu(){},ModelMenuCloseContext:{Provider:function Provider(){}},REASONING_EFFORTS:['minimal','low','medium','high','xhigh','max','ultra'],REASONING_EFFORT_VALUES:['none','minimal','low','medium','high','xhigh','max','ultra'],catalogProviderMatches:(p,v)=>p.slug===v||p.name===v||p.aliases?.includes(v),reasoningEffortLabel:value=>value === 'none'?'Off':value ? value[0].toUpperCase()+value.slice(1) : ''}
+  sdk.Codicon = function Codicon(){}
   if (!oldSdk) sdk.MODEL_CATALOG_CAPABILITIES = {selectionOnly}
   const slots = [], effectDeps = []; let hook = 0, effectHook = 0, effectsEnabled = false, pendingEffects = []
   const react = {useState:v=>{const i=hook++;if (!(i in slots)) slots[i]=v;return [slots[i],value=>{slots[i]=typeof value==='function'?value(slots[i]):value}]},useRef:v=>{const i=hook++;if (!(i in slots)) slots[i]={current:v};return slots[i]},useEffect:(fn,deps)=>{const i=effectHook++;if(!effectsEnabled)return;if(!effectDeps[i] || deps.some((v,j)=>!Object.is(v,effectDeps[i][j]))){effectDeps[i]=deps;pendingEffects.push(fn)}}}
@@ -40,7 +41,7 @@ async function load({selectionOnly = true, oldSdk = false} = {}) {
   })
   await mod.evaluate()
   const ctx = {register:c=>contributions.push(c),onDispose:f=>disposers.push(f),os:{writeClipboard:async()=>true},files:{}}
-  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,state,route,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
+  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,workspaces,notices,host,state,route,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
 }
 function fixture(mod, overrides={}) {
   let current, n=0
@@ -54,7 +55,7 @@ function fixture(mod, overrides={}) {
 test('actual module registers native action and pane; fresh capture never reads composer',async()=>{
   const f=await load(); let reads=0; f.setDraft(async()=>{reads++;return 'should not read'})
   f.mod.namespace.default.register(f.ctx)
-  assert.deepEqual(f.contributions.map(c=>c.area),['panes','composer.actions'])
+  assert.deepEqual(f.contributions.map(c=>c.area),['workspace','composer.actions']);assert.equal(f.workspaces.length,0)
   await tick(); const action=actionButton(f); action.props.onClick()
   await new Promise(resolve=>setImmediate(resolve)); await new Promise(resolve=>setImmediate(resolve))
   assert.equal(reads,0); assert.equal(f.requests.length,1); assert.equal(f.requests[0][1],'plugin.prompt-refiner.describe')
@@ -190,7 +191,7 @@ const nodes = (node,out=[]) => { if (!node || typeof node !== 'object') return o
 const tick = () => new Promise(resolve=>setImmediate(resolve))
 const actionNodes = f => { const action=f.contributions[1].render(); return nodes(action.type(action.props)) }
 const actionButton = f => actionNodes(f).find(n=>n.props?.children==='Refine')
-const click = (f,label) => nodes(f.render()).find(n=>n.props?.children===label).props.onClick()
+const click = (f,label) => nodes(f.render()).find(n=>n.props?.children===label || n.props?.['aria-label']===label).props.onClick()
 const pick = (f,label) => { nodes(f.render()).find(n=>n.type?.name==='DropdownMenu' && nodes(n).some(x=>x.props?.['aria-label']==='Add context or attachments')).props.onOpenChange(true); nodes(f.render()).find(n=>n.type?.name==='DropdownMenuItem' && n.props.children===label).props.onSelect() }
 const typeMessage = (f,value) => nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner').props.onChange({target:{value,style:{},scrollHeight:28}})
 const review = f => nodes(f.render()).find(n=>n.props?.['aria-label']==='Send').props.onClick()
@@ -249,11 +250,12 @@ test('unsupported controls are disabled and resize works by keyboard and pointer
 
 test('native pane is docked beside chat and revealed only by the action',async()=>{
   const f=await load();f.mod.namespace.default.register(f.ctx);await tick()
-  const pane=f.contributions.find(c=>c.area==='panes')
-  assert.deepEqual(plain(pane.data),{placement:'main',dock:{pane:'workspace',pos:'right',enforce:true},defaultCollapsed:true,width:'560px'})
-  assert.deepEqual(f.reveals,[])
+  assert.equal(f.workspaces.length,0);assert.deepEqual(f.reveals,[])
   actionButton(f).props.onClick()
-  assert.deepEqual(f.reveals,['prompt-refiner:pane'])
+  assert.equal(f.workspaces.length,1);assert.deepEqual(plain(f.workspaces[0].dock),{pane:'workspace',pos:'right'});assert.equal(f.workspaces[0].minWidth,'22rem')
+  await tick();await tick();typeMessage(f,'keep this');actionButton(f).props.onClick();assert.equal(f.workspaces.length,1);assert.deepEqual(f.reveals,['plugin-workspace:prompt-refiner'])
+  f.workspaces[0].onClose();actionButton(f).props.onClick();assert.equal(f.workspaces.length,2);assert.equal(nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner').props.value,'keep this')
+  f.disposers[0]();assert.equal(f.workspaces[1].closed,true);actionButton(f).props.onClick();assert.equal(f.workspaces.length,2)
 })
 
 test('production history picker selects only checked messages and settings action navigates',async()=>{
@@ -490,6 +492,31 @@ test('unsupported RPC is distinguished without exposing backend messages',async(
     const f=fixture((await load()).mod,{requestProfile:async()=>{throw problem}});await f.controller.open();assert.equal(f.state.error,expected);assert.equal(f.state.error.includes('secret'),false)
   }
   const f=fixture((await load()).mod,{requestProfile:async()=>({error:{code:-32601,message:'secret'}})});await f.controller.open();assert.equal(f.state.error,'Required Hermes plugin API is unavailable.')
+})
+
+test('review preserves missing API error through prepare and recovers on refresh',async()=>{
+  const f=await load();let response={error:{code:-32601,message:'private'}}
+  f.setRequest(async()=>response);f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
+  typeMessage(f,'my message');review(f);let all=nodes(f.render())
+  assert.ok(all.some(n=>n.props?.children==='Model unavailable'));assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'))
+  click(f,'Prepare preview');await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'));assert.equal(f.requests.filter(r=>r[1].endsWith('prepare')).length,0)
+  response={ok:true,data:{...description,configured_route:null}};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='No model configured'))
+  response={ok:true,data:description};click(f,'Refresh route');await tick();await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Model: openai-codex / fixture-model'));assert.equal(all.some(n=>n.props?.children==='Required Hermes plugin API is unavailable.'),false)
+})
+
+test('review displays readable content and distinct consent without raw metadata',async()=>{
+  const f=await load();f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'my message');review(f)
+  let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='my message'));assert.ok(all.some(n=>typeof n.props?.children==='string' && n.props.children.includes('Send to refiner sends it to a model provider')))
+  assert.ok(all.some(n=>n.props?.children==='Hermes may send selected content to another provider or model, regardless of the selection shown. Images are not redacted.'))
+  click(f,'Prepare preview');await tick();all=nodes(f.render());assert.ok(all.some(n=>n.props?.children===golden.prepared.user_input));assert.ok(all.some(n=>n.props?.children==='Keine Builds.\n'));assert.ok(all.some(n=>n.props?.children==='Send to refiner'))
+  const visible=all.map(n=>typeof n.props?.children==='string'?n.props.children:'').join(' ');assert.doesNotMatch(visible,/Captured owner|atomic owner|"user_input"|preview_digest/)
+  const discard=all.find(n=>n.props?.['aria-label']==='Discard refinement');assert.equal(discard.props.variant,'ghost');assert.equal(discard.props.size,'icon-xs');assert.equal(discard.props.children.type.name,'Codicon')
+})
+
+test('unsupported workspace API reports error without opening or capturing',async()=>{
+  const f=await load();delete f.host.openWorkspace;f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  assert.equal(f.workspaces.length,0);assert.equal(f.requests.length,0);assert.match(f.notices[0].message,/cannot open/)
 })
 
 test('model override denial uses the safe mapped error',async()=>{
