@@ -20,10 +20,10 @@ async function load({selectionOnly = true, oldSdk = false} = {}) {
   const options = [], contributions = [{area:'workspace'}], requests = [], disposers = [], removals = [], cancellations = [], navigations = [], reveals = [], composerWrites = [], workspaces = [], notices = []
   const route = {connectionId:'conn',mode:'remote',profile:'profile',targetProfile:'target'}
   const state = {focusedSessionOwner:makeAtom({connectionId:'conn',profile:'profile'}),focusedStoredSessionId:makeAtom(null),focusedSessionId:makeAtom(null)}
-  let catalogData = {providers:[{slug:'openai-codex',name:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:true}}}]}, epoch = 1, draft = async () => 'stored draft', routes = async () => [route], request = async () => ({ok:true,data:description})
+  let catalogData = {providers:[{slug:'openai-codex',name:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:true}}}]}, statusResult = {}, epoch = 1, draft = async () => 'stored draft', routes = async () => [route], request = async () => ({ok:true,data:description})
   const host = {state,composer:{getDraft:id=>draft(id),setDraft:(...args)=>composerWrites.push(args)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},openWorkspace:(id,options)=>{const workspace={id,...options,closed:false};workspaces.push(workspace);contributions[0]=workspace;return ()=>{workspace.closed=true;options.onClose()}},revealPane:id=>reveals.push(id),navigate:path=>navigations.push(path),notify:notice=>notices.push(notice)}
   const cache = {cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))}
-  const sdk = {atom:makeAtom,useValue:a=>a.get(),useQuery:o=>{options.push(o);return o.queryKey[1]==='model-options'?{data:catalogData}:{}},queryClient:cache,host,gatewayActivationEpoch:()=>epoch,COMPOSER_AREAS:{actions:'composer.actions'},Button:function Button(){},Textarea:function Textarea(){},Checkbox:function Checkbox(){},DropdownMenu:function DropdownMenu(){},DropdownMenuTrigger:function DropdownMenuTrigger(){},DropdownMenuContent:function DropdownMenuContent(){},DropdownMenuItem:function DropdownMenuItem(){},Dialog:function Dialog(){},DialogContent:function DialogContent(){},DialogTitle:function DialogTitle(){},ModelCatalogMenu:function ModelCatalogMenu(){},ModelMenuCloseContext:{Provider:function Provider(){}},REASONING_EFFORTS:['minimal','low','medium','high','xhigh','max','ultra'],REASONING_EFFORT_VALUES:['none','minimal','low','medium','high','xhigh','max','ultra'],catalogProviderMatches:(p,v)=>p.slug===v||p.name===v||p.aliases?.includes(v),reasoningEffortLabel:value=>value === 'none'?'Off':value ? value[0].toUpperCase()+value.slice(1) : ''}
+  const sdk = {atom:makeAtom,useValue:a=>a.get(),useQuery:o=>{options.push(o);return o.queryKey[1]==='model-options'?{data:catalogData}:o.enabled?statusResult:{}},queryClient:cache,host,gatewayActivationEpoch:()=>epoch,COMPOSER_AREAS:{actions:'composer.actions'},Button:function Button(){},Textarea:function Textarea(){},Checkbox:function Checkbox(){},DropdownMenu:function DropdownMenu(){},DropdownMenuTrigger:function DropdownMenuTrigger(){},DropdownMenuContent:function DropdownMenuContent(){},DropdownMenuItem:function DropdownMenuItem(){},Dialog:function Dialog(){},DialogContent:function DialogContent(){},DialogTitle:function DialogTitle(){},ModelCatalogMenu:function ModelCatalogMenu(){},ModelMenuCloseContext:{Provider:function Provider(){}},REASONING_EFFORTS:['minimal','low','medium','high','xhigh','max','ultra'],REASONING_EFFORT_VALUES:['none','minimal','low','medium','high','xhigh','max','ultra'],catalogProviderMatches:(p,v)=>p.slug===v||p.name===v||p.aliases?.includes(v),reasoningEffortLabel:value=>value === 'none'?'Off':value ? value[0].toUpperCase()+value.slice(1) : ''}
   sdk.Codicon = function Codicon(){}
   if (!oldSdk) sdk.MODEL_CATALOG_CAPABILITIES = {selectionOnly}
   const slots = [], effectDeps = []; let hook = 0, effectHook = 0, effectsEnabled = false, pendingEffects = []
@@ -41,7 +41,7 @@ async function load({selectionOnly = true, oldSdk = false} = {}) {
   })
   await mod.evaluate()
   const ctx = {register:c=>contributions.push(c),onDispose:f=>disposers.push(f),os:{writeClipboard:async()=>true},files:{}}
-  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,workspaces,notices,host,state,route,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
+  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,workspaces,notices,host,state,route,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setStatusResult:v=>{statusResult=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
 }
 function fixture(mod, overrides={}) {
   let current, n=0
@@ -216,12 +216,15 @@ test('rendered send prepares and starts once, without a review dialog',async()=>
 })
 
 test('send progress stays immediately above the composer, outside conversation scrolling',async()=>{
-  const f=await load(), wait=deferred(), discussion='Long conversation line\n'.repeat(100)
+  const f=await load(), preparing=deferred(), starting=deferred(), discussion='Long conversation line\n'.repeat(100)
   f.setRequest(async(r,m,p)=>{
     if(m.endsWith('describe')) return {ok:true,data:description}
-    if(m.endsWith('prepare')) return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}
+    if(m.endsWith('prepare')) {
+      await preparing.promise
+      return {ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}
+    }
     if(m.endsWith('start')) {
-      await wait.promise
+      await starting.promise
       return {ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}
     }
     return {ok:true,data:{released:true,abandoned:false}}
@@ -229,21 +232,29 @@ test('send progress stays immediately above the composer, outside conversation s
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
   const checkStatus = text => {
     const pane=f.render(), siblings=pane.props.children.filter(Boolean), main=siblings.find(n=>n.type==='main')
-    const status=siblings[siblings.indexOf(main)+1], composer=siblings[siblings.indexOf(main)+2]
-    assert.equal(status.props.role,'status');assert.equal(nodes(composer).some(n=>n.type==='textarea'),true)
+    const status=siblings.find(n=>n.props.role==='status'), composer=siblings[siblings.indexOf(status)+1]
+    assert.ok(siblings.indexOf(status)>siblings.indexOf(main));assert.equal(nodes(composer).some(n=>n.type==='textarea'),true)
     assert.deepEqual(nodes(status).map(n=>n.props?.children).filter(value=>typeof value==='string'),text ? [text] : [])
     return nodes(main)
   }
   assert.ok(checkStatus(null).some(n=>n.props?.children==='Refine your prompt'))
   typeMessage(f,'first');review(f);await tick()
+  const busy='Refiner is thinking...'
+  assert.deepEqual(f.requests.map(r=>r[1]),['plugin.prompt-refiner.describe','plugin.prompt-refiner.prepare'])
+  assert.equal(checkStatus('Preparing request…').some(n=>n.props?.children==='Refine your prompt'),false)
+  preparing.resolve();await tick()
+  assert.equal(f.requests.at(-1)[1],'plugin.prompt-refiner.start')
   assert.equal(checkStatus('Starting request…').some(n=>n.props?.children==='Refine your prompt'),false)
-  wait.resolve();await tick()
-  assert.equal(checkStatus('Waiting for refiner…').some(n=>n.props?.children==='Refine your prompt'),false)
+  starting.resolve();await tick()
+  assert.equal(checkStatus(busy).some(n=>n.props?.children==='Refine your prompt'),false)
+  f.setStatusResult({isError:true})
+  checkStatus('Status unavailable. The request may still be running.')
+  f.setStatusResult({})
   const controller=f.contributions[0].render().props.controller, identity=controller.getState().job.identity
   controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:discussion,candidate_prompt:null,reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
   assert.ok(checkStatus(null).some(n=>n.props?.children===discussion))
   typeMessage(f,'follow-up');review(f);await tick()
-  assert.ok(checkStatus('Waiting for refiner…').some(n=>n.props?.children===discussion))
+  assert.ok(checkStatus(busy).some(n=>n.props?.children===discussion))
 })
 
 test('only plain Enter in the message editor sends',async()=>{
@@ -281,7 +292,13 @@ test('discussion, correction and final remain distinct and only final is copied'
   assert.ok(all.some(n=>n.props?.children==='Reported by Hermes: review-provider / review-model'))
   typeMessage(f,'Approved');review(f);await tick();finish('Final wording\nReady.','Final wording');all=nodes(f.render())
   assert.equal(all.some(n=>typeof n.props?.children==='string' && n.props.children.startsWith('Reported by Hermes:')),false)
-  assert.ok(all.some(n=>Array.isArray(n.props?.children) && n.props.children[0]==='Final prompt'));assert.ok(all.some(n=>n.props?.children==='Ready.'));assert.equal(all.filter(n=>n.props?.children==='Final wording').length,0)
+  assert.ok(all.some(n=>Array.isArray(n.props?.children) && n.props.children[0]==='Final prompt'))
+  const turns=all.filter(n=>n.props?.role==='group')
+  assert.deepEqual(turns.map(n=>n.props['aria-label']),['You','Refiner','You','Refiner','You','Refiner'])
+  assert.equal(turns.at(-2).props.children,'Approved');assert.equal(turns.at(-1).props.children,'Ready.')
+  assert.match(turns.at(-2).props.className,/\bpr-turn-user\b/);assert.doesNotMatch(turns.at(-1).props.className,/\bpr-turn-user\b/)
+  assert.ok(turns.every(n=>n.props['data-selectable-text']==='true'))
+  assert.equal(all.some(n=>['You','Refiner','Final wording'].includes(n.props?.children)),false)
   const oldCopy=all.find(n=>n.props?.children==='Copy prompt');oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording'])
   typeMessage(f,'Change the tone');review(f);await tick();finish('New working draft. Is this tone right?',null);all=nodes(f.render());assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false);assert.ok(all.some(n=>n.props?.children==='New working draft. Is this tone right?'));oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording']);assert.deepEqual(f.composerWrites,[])
 })
@@ -341,6 +358,31 @@ test('production pane exposes one composer and no review dialog',async()=>{
   assert.equal(inputs[0].props.rows,1)
   assert.equal(all.some(n=>n.props?.children==='Prepare preview'),false)
   assert.equal(all.some(n=>n.props?.children==='Review request'),false)
+})
+
+test('composer uses compact native glyphs and one solid Send accent',async()=>{
+  const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  const controls=()=>{
+    const all=nodes(f.render()), row=all.find(n=>n.props?.className==='pr-row')
+    return {add:nodes(row.props.children[0]).find(n=>n.props?.['aria-label']==='Add context or attachments'),input:row.props.children[1],model:nodes(row.props.children[2]).find(n=>n.props?.['aria-label']==='Refiner model for this conversation'),send:row.props.children[3],css:all.find(n=>n.type==='style').props.children}
+  }
+  const {add,input,model,send,css}=controls()
+  for(const [button,name] of [[add,'add'],[send,'arrow-up']]) {
+    assert.equal(button.props.children.type.name,'Codicon')
+    assert.equal(button.props.children.props.name,name)
+    assert.equal(button.props.children.props.size,'0.875rem')
+  }
+  assert.equal(input.type,'textarea')
+  assert.ok(nodes(model).some(n=>n.type==='svg' && n.props['aria-hidden']===true))
+  assert.match(css,/\.pr-route-pill\{[^}]*font-size:var\(--text-xs,\.75rem\)[^}]*font-weight:400/)
+  assert.doesNotMatch(css,/\.pr-route-controls\{[^}]*max-width:/)
+  assert.match(css,/\.pr-input\{[^}]*field-sizing:content/)
+  assert.doesNotMatch(css,/\b[\d.]+cq[ibwh]\b/)
+  assert.match(css,/\.pr-send\{[^}]*background:var\(--dt-primary\);color:var\(--dt-primary-foreground\)/)
+  assert.doesNotMatch(css,/\.pr-send[^{}]*(?:hover|disabled)[^{}]*\{[^}]*\b(?:background(?:-color)?|color):/)
+  assert.equal(send.props.disabled,true)
+  typeMessage(f,'Ready to send');assert.equal(controls().send.props.disabled,false)
+  review(f);assert.equal(controls().send.props.disabled,true)
 })
 
 test('model controller stays local and uses captured owner',async()=>{
@@ -769,6 +811,26 @@ test('panel copy sends only candidate text and reports clipboard acknowledgement
   const pane=f.contributions[0].render(),controller=pane.props.controller,identity=controller.getState().job.identity
   controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:'Reply',candidate_prompt:'candidate only',reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
   click(f,'Copy prompt');await tick();assert.deepEqual(copies,['candidate only']);assert.deepEqual(f.composerWrites,[]);assert.ok(nodes(f.render()).some(n=>n.props?.children==='Copied prompt. Paste it and reattach any required files yourself.'))
+})
+
+test('final prompt is a self-sizing wrapped editor with exact copy after clearing and retyping',async()=>{
+  const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return true}
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  const controller=f.contributions[0].render().props.controller,long='  Keep the exact wrapping, spacing and punctuation.\n'.repeat(23)+'\nEnd.\n'
+  const editor=()=>nodes(f.render()).find(n=>n.type?.name==='Textarea')
+  controller.editCandidate(long)
+  assert.equal(editor().props.value,long)
+  const css=nodes(f.render()).find(n=>n.type==='style').props.children
+  assert.match(editor().props.className,/\bpr-final\b/)
+  assert.match(css,/\.pr-final\{[^}]*field-sizing:content[^}]*max-height:calc\(20lh[^}]*overflow:hidden auto/)
+  editor().props.onChange({target:{value:''}})
+  assert.equal(editor().props.value,'')
+  const emptyCopy=nodes(f.render()).find(n=>n.props?.children==='Copy prompt')
+  assert.equal(emptyCopy.props.disabled,true);emptyCopy.props.onClick();await tick();assert.deepEqual(copies,[])
+  const edited='  leading\n\ntrailing  \n'
+  editor().props.onChange({target:{value:edited}})
+  assert.equal(editor().props.value,edited)
+  click(f,'Copy prompt');await tick();assert.deepEqual(copies,[edited]);assert.deepEqual(f.composerWrites,[])
 })
 
 
