@@ -1,0 +1,109 @@
+diff --git a/apps/desktop/src/sdk/index.ts b/apps/desktop/src/sdk/index.ts
+--- a/apps/desktop/src/sdk/index.ts
++++ b/apps/desktop/src/sdk/index.ts
+@@ -1178,11 +1178,13 @@
+     options: {
+       dock?: { before?: null | string; pane: string; pos: 'bottom' | 'center' | 'left' | 'right' | 'top' }
+       headerVeto?: boolean
++      height?: string
+       minWidth?: string
+       onClose?: () => void
+       render: () => ReactNode
+       title?: string
+       uncloseable?: boolean
++      width?: string
+     }
+   ): (() => void) => {
+     const key = (id ?? '').trim()
+@@ -1200,9 +1202,12 @@
+         // closeable so it keeps its tab when it lands in a zone of its own.
+         dock: options.dock ?? { pane: 'workspace', pos: 'center' },
+         headerVeto: options.headerVeto,
+-        minWidth: options.minWidth ?? '22rem',
++        height: options.height,
++        minWidth: options.minWidth ?? (options.width === undefined ? '22rem' : undefined),
+         placement: 'main',
+-        uncloseable: options.uncloseable
++        splitLocalSizing: true,
++        uncloseable: options.uncloseable,
++        width: options.width
+       },
+       id: paneId,
+       render: options.render,
+diff --git a/apps/desktop/src/components/pane-shell/tree/renderer/track-model.ts b/apps/desktop/src/components/pane-shell/tree/renderer/track-model.ts
+--- a/apps/desktop/src/components/pane-shell/tree/renderer/track-model.ts
++++ b/apps/desktop/src/components/pane-shell/tree/renderer/track-model.ts
+@@ -52,6 +52,7 @@
+   maxWidth?: string
+   minHeight?: string
+   maxHeight?: string
++  splitLocalSizing?: boolean
+ }
+ 
+ /** Chrome behavior flags a pane contributes. Read via `paneChrome`. */
+@@ -244,7 +245,12 @@
+   return -1
+ }
+ 
+-export function fixedTrackSize(node: LayoutNode, axis: 'row' | 'column', ctx: TrackContext): string | null {
++export function fixedTrackSize(
++  node: LayoutNode,
++  axis: 'row' | 'column',
++  ctx: TrackContext,
++  directChild = true
++): string | null {
+   if (node.type === 'group') {
+     // Ancestor splits must size a minimized zone as its strip, not as its
+     // panes' declared widths — otherwise the outer track keeps reserving the
+@@ -256,7 +262,12 @@
+     const overrideKey = axis === 'row' ? 'widthOverride' : 'heightOverride'
+ 
+     const declared = (id: string) => {
+-      const sizing = (ctx.paneFor(id)?.data ?? {}) as PaneSizing
++      const sizing = paneChrome(ctx.paneFor(id))
++
++      if (!directChild && sizing.splitLocalSizing) {
++        return null
++      }
++
+       const css = (axis === 'row' ? sizing.width : sizing.height) ?? null
+       const override = ctx.overrides[id]?.[overrideKey]
+ 
+@@ -299,7 +310,7 @@
+   }
+ 
+   const visible = node.children.filter(child => !subtreeGone(child, ctx))
+-  const sizes = visible.map(child => fixedTrackSize(child, axis, ctx))
++  const sizes = visible.map(child => fixedTrackSize(child, axis, ctx, false))
+ 
+   if (node.orientation === axis) {
+     if (sizes.length === 0 || sizes.some(size => size === null)) {
+@@ -365,10 +376,11 @@
+   node: LayoutNode,
+   edge: 'start' | 'end',
+   axis: 'row' | 'column',
+-  ctx: TrackContext
++  ctx: TrackContext,
++  directChild = true
+ ): GroupNode | null {
+   if (node.type === 'group') {
+-    return fixedTrackSize(node, axis, ctx) !== null ? node : null
++    return fixedTrackSize(node, axis, ctx, directChild) !== null ? node : null
+   }
+ 
+   const visible = node.children.filter(child => !subtreeGone(child, ctx))
+@@ -376,12 +388,12 @@
+   if (node.orientation === axis) {
+     const child = edge === 'start' ? visible[0] : visible[visible.length - 1]
+ 
+-    return child ? edgeFixedZone(child, edge, axis, ctx) : null
++    return child ? edgeFixedZone(child, edge, axis, ctx, false) : null
+   }
+ 
+   // Cross-axis: every child touches the edge — the first fixed one owns it.
+   for (const child of visible) {
+-    const zone = edgeFixedZone(child, edge, axis, ctx)
++    const zone = edgeFixedZone(child, edge, axis, ctx, false)
+ 
+     if (zone) {
+       return zone
