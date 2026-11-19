@@ -4,6 +4,8 @@ import { useEffect, useState, useRef } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const prefix = 'plugin.prompt-refiner.'
+const workspaceId = 'prompt-refiner'
+const paneId = `plugin-workspace:${workspaceId}`
 const textExtensions = new Set('txt md rst csv tsv json yaml yml toml ini xml html css scss js jsx ts tsx py sh bash nix c h cpp hpp rs go java sql log'.split(' '))
 const imageExtensions = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' }
 const byteLength = value => new TextEncoder().encode(value).length
@@ -53,7 +55,7 @@ const initial = () => ({ origin:null, refinementId:null, revision:0, candidateRe
 
 export function createController(dependencies) {
   const { captureOrigin, requestProfile, readSelectedFile, writeClipboard, queryClient: cache, newId, publish } = dependencies
-  let state = initial(), generation = 0, routeGeneration = 0, disposed = false
+  let state = initial(), generation = 0, routeGeneration = 0, disposed = false, copying = false
   const emit = patch => { state = snapshotValue({ ...state, ...patch }); publish(state); return state }
   const live = g => !disposed && g === generation
   const invalidate = patch => {
@@ -71,13 +73,13 @@ export function createController(dependencies) {
     void rpc(job.origin, 'release', {protocol_version:1, identity:job.identity, handle:job.handle}).catch(() => {})
   }
   const effectiveRoute = () => state.execution.model_override || state.routeInfo?.configured_route || null
-  async function refreshRoute() {
+  async function loadRoute(describe) {
     if (!state.origin) return state
     const g = generation, origin = state.origin, routeRequest = ++routeGeneration, previousJob = state.job
     emit({routeState:'loading',routeInfo:null,routeError:null,prepared:null,job:null,message:previousJob ? 'The previous request may have run.' : null})
     if (previousJob?.handle) cleanJob(previousJob)
     try {
-      const result = await rpc(origin, 'describe', {protocol_version:2})
+      const result = await describe(origin)
       if (!live(g) || routeRequest !== routeGeneration) return state
       if (result?.error?.code === -32601) return emit({routeState:'missing',routeError:errors.incompatible_api,error:errors.incompatible_api})
       if (failureValid(result)) return emit({routeState:'failed',routeError:errorText(result),error:errorText(result)})
@@ -88,19 +90,27 @@ export function createController(dependencies) {
       return emit({routeInfo:data, routeState:data.configured_route ? 'ready' : 'unconfigured', routeError:null, execution, prepared:changed || !sameExecution(execution,state.execution) ? null : state.prepared, error:(execution.model_override || data.configured_route) ? null : 'Configure the independent refiner provider and model.'})
     } catch (error) { if (live(g) && routeRequest === routeGeneration) { const text = error?.code === -32601 ? errors.incompatible_api : 'Route unavailable. Reopen from the intended chat.'; return emit({routeInfo:null,routeState:error?.code === -32601 ? 'missing' : 'failed',routeError:text,prepared:null,error:text}) } return state }
   }
-  async function open(source) {
+  const refreshRoute = () => loadRoute(origin => rpc(origin, 'describe', {protocol_version:2}))
+  const openingError = 'Could not open from this chat. Close the pane and choose Refine again.'
+  async function open(source, isCurrent = () => true) {
     if (disposed || state.opening) return state
     if (state.origin) return state
     const g = ++generation
     emit({opening:true, error:null})
     try {
-      const origin = await captureOrigin(source)
+      const captured = await captureOrigin(source, () => live(g) && isCurrent())
       if (!live(g)) return state
-      if (!origin?.route || typeof origin.draft !== 'string') return emit({opening:false, error:'Could not read this chat’s draft. Click Refine to try again.'})
-      emit({origin, draft:'', userInput:origin.draft, refinementId:newId(), opening:false})
-      return await refreshRoute()
-    } catch { if (live(g)) return emit({opening:false, error:'Could not read this chat’s draft. Click Refine to try again.'}); return state }
+      if (!isCurrent() || !captured?.route || typeof captured.draft !== 'string') return emit({opening:false, error:openingError})
+      const {draft, ...origin} = captured
+      emit({origin, userInput:draft, refinementId:newId(), opening:false})
+      if (!live(g)) return state
+      return await (dependencies.describeOrigin ? loadRoute(origin => {
+        if (!live(g) || !isCurrent()) throw new Error('capture ended')
+        return dependencies.describeOrigin(origin)
+      }) : refreshRoute())
+    } catch { if (live(g)) return emit({opening:false, error:openingError}); return state }
   }
+  function cancelOpen() { if (state.opening) { generation++; emit({opening:false}) } }
   function setInput(values) {
     if (state.job && Object.hasOwn(values, 'userInput')) return state
     const patch = {}
@@ -196,15 +206,22 @@ export function createController(dependencies) {
     return emit(patch)
   }
   function applyProposal() { if (state.proposal === null) return state; return invalidate({candidate:state.proposal, showCandidate:true, proposal:null, candidateRevision:state.candidateRevision + 1}) }
-  async function copy() {
-    const g = generation, candidate = state.candidate
-    if (!candidate || !safeText(candidate,32768)) return emit({error:'No valid candidate to copy.'})
-    try { const ok = await writeClipboard(candidate); if (live(g) && state.candidate === candidate) return emit(ok === true ? {message:'Copied prompt. Paste it and reattach any required files yourself.', error:null} : {error:'Clipboard unavailable. Select text manually.'}) } catch { if (live(g) && state.candidate === candidate) return emit({error:'Clipboard unavailable. Select text manually.'}) }
+  async function copy(expected = state, isCurrent = () => true, close = () => {}) {
+    const current = () => !disposed && state === expected && isCurrent()
+    if (!current() || copying || state.job || !state.showCandidate || !state.candidate) return state
+    if (!safeText(state.candidate,32768)) return emit({error:'No valid candidate to copy.'})
+    copying = true
+    let acknowledged = false
+    try { acknowledged = await writeClipboard(state.candidate) === true } catch {} finally { copying = false }
+    if (!current()) return state
+    if (!acknowledged) return emit({error:'Clipboard unavailable. Try again or copy the text manually.'})
+    discard()
+    close()
     return state
   }
   function discard() { generation++; const job = state.job; state = snapshotValue(initial()); publish(state); cleanJob(job?.handle ? job : null); return state }
   function dispose() { if (disposed) return state; discard(); disposed = true; return state }
-  return {open, setInput, setExecution, effectiveRoute, setSelection, editCandidate, prepare, send, acceptStatus, applyProposal, copy, discard, dispose, refreshRoute, getState:() => state}
+  return {open, cancelOpen, setInput, setExecution, effectiveRoute, setSelection, editCandidate, prepare, send, acceptStatus, applyProposal, copy, discard, dispose, refreshRoute, getState:() => state}
 }
 
 function snapshot() {
@@ -212,21 +229,25 @@ function snapshot() {
   return {owner:owner && {connectionId:owner.connectionId, profile:owner.profile}, storedId:host.state.focusedStoredSessionId.get(), runtimeId:host.state.focusedSessionId.get(), epoch:gatewayActivationEpoch()}
 }
 function sameSnapshot(a,b) { return a.owner?.connectionId === b.owner?.connectionId && a.owner?.profile === b.owner?.profile && a.storedId === b.storedId && a.runtimeId === b.runtimeId && a.epoch === b.epoch }
-async function captureOrigin(before, cached, refreshMetadata) {
-  if (!sameSnapshot(before,snapshot())) throw new Error('capture')
-  if (!cached || cached.epoch !== before.epoch) { void refreshMetadata(); throw new Error('capture') }
-  if (!before.owner?.connectionId || !before.owner?.profile || (!before.storedId && before.runtimeId)) throw new Error('capture')
-  const matching = cached.routes.filter(r => r.connectionId === before.owner.connectionId && r.profile === before.owner.profile && r.targetProfile)
-  if (matching.length !== 1) { void refreshMetadata(); throw new Error('capture') }
-  const draft = before.storedId ? await host.composer.getDraft(before.storedId) : ''
-  let afterRoutes
-  try { afterRoutes = await host.profileRoutes() } catch { void refreshMetadata(); throw new Error('capture') }
-  if (!Array.isArray(afterRoutes) || afterRoutes.filter(r => r.connectionId === before.owner.connectionId && r.profile === before.owner.profile && r.targetProfile).length !== 1 || !afterRoutes.some(r => sameRoute(r,matching[0])) || !sameSnapshot(before,snapshot()) || typeof draft !== 'string') { void refreshMetadata(); throw new Error('capture') }
-  return {route:matching[0], storedId:before.storedId, runtimeId:before.runtimeId, draft}
+function routeForOwner(routes, owner) {
+  if (!Array.isArray(routes)) return null
+  const matches = routes.filter(route => route?.connectionId === owner.connectionId && route.profile === owner.profile)
+  return matches.length === 1 && typeof matches[0].targetProfile === 'string' && matches[0].targetProfile ? matches[0] : null
+}
+async function captureOrigin(before, isCurrent, warmRoutes, discoverRoutes) {
+  const {owner, runtimeId, epoch} = before
+  const storedId = before.storedId === 'new' ? null : before.storedId
+  if (!isCurrent() || !owner?.connectionId || !owner.profile || (!storedId && runtimeId)) throw new Error('capture')
+  const warmRoute = storedId && routeForOwner(warmRoutes,owner)
+  const draft = warmRoute ? await host.composer.getDraft(storedId) : ''
+  if (!isCurrent() || typeof draft !== 'string') throw new Error('capture')
+  const route = routeForOwner(await discoverRoutes(epoch),owner)
+  if (!isCurrent() || !route || (warmRoute && (!sameRoute(route,warmRoute) || route.mode !== warmRoute.mode))) throw new Error('capture')
+  return {route, storedId, runtimeId, draft, manualDraft:!!storedId && !warmRoute}
 }
 async function routed(route, method, params, guard) {
-  const routes = await host.profileRoutes()
-  if (!Array.isArray(routes) || routes.filter(r => r.connectionId === route.connectionId && r.profile === route.profile && r.targetProfile).length !== 1 || !routes.some(r=>sameRoute(route,r)) || (guard && !guard())) throw new Error('route unavailable')
+  const currentRoute = routeForOwner(await host.profileRoutes(),route)
+  if (!sameRoute(route,currentRoute) || route.mode !== currentRoute.mode || (guard && !guard())) throw new Error('route unavailable')
   return host.requestProfile(route, method, params)
 }
 
@@ -284,7 +305,7 @@ async function readFile(ctx, item) {
   return {id:crypto.randomUUID(), kind:text ? 'text' : 'image', name, mime:text ? 'text/plain' : imageMime, data_base64:match[2]}
 }
 
-function Panel({controller, store, ctx}) {
+function Panel({controller, store, ctx, copyPrompt}) {
   const s = useValue(store)
   const [history, setHistory] = useState([])
   const [cursor, setCursor] = useState(null)
@@ -376,7 +397,7 @@ function Panel({controller, store, ctx}) {
   }
   const button = (label, onClick, disabled = false) => jsx(Button,{type:'button',variant:'secondary',onClick,disabled,children:label})
   const prose = text => jsx('div',{className:'pr-prose',children:text})
-  if (!s.origin) return jsx('div',{className:'flex h-full min-h-0 flex-col text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:jsxs('main',{className:'grid min-h-0 flex-1 place-items-center p-4 text-(--ui-text-tertiary)',children:[jsx('div',{className:'text-base',children:'Refine your prompt'}),s.error && jsx('p',{role:'alert',children:s.error})]})})
+  if (!s.origin) return jsx('div',{className:'flex h-full min-h-0 flex-col text-sm',style:{fontFamily:'var(--dt-font-sans)'},children:jsxs('main',{className:'grid min-h-0 flex-1 place-items-center p-4 text-(--ui-text-tertiary)',children:[s.opening ? jsx('p',{role:'status',children:'Loading the refiner…'}) : jsx('div',{className:'text-base',children:'Refine your prompt'}),s.error && jsx('p',{role:'alert',children:s.error})]})})
   const route = s.routeInfo ? s.execution.model_override || s.routeInfo.configured_route : null
   const modelLabel = route?.model || 'Model unavailable'
   const statusMessage = job && status.isError ? 'Status unavailable. The request may still be running.' : s.message
@@ -444,7 +465,7 @@ function Panel({controller, store, ctx}) {
     `}),
     jsx('header',{style:{display:'flex',justifyContent:'flex-end',padding:'4px 8px',borderBottom:'1px solid var(--ui-stroke-secondary)'},children:jsx(Button,{type:'button',variant:'ghost',size:'icon-xs','aria-label':'Discard refinement',title:'Discard refinement',onClick:()=>{if(sameDiscussion(controller.getState()))controller.discard()},children:jsx(sdk.Codicon,{name:'trash'})})}),
     jsxs('main',{className:`pr-main min-h-0 flex-1 overflow-auto p-4${showEmpty ? ' grid place-items-center' : ''}`,children:[
-      showEmpty && jsx('div',{className:'text-base text-(--ui-text-tertiary)',children:'Refine your prompt'}),
+      showEmpty && jsx('div',{className:'text-base text-(--ui-text-tertiary)',children:s.origin.manualDraft ? 'Paste or type your prompt' : 'Refine your prompt'}),
       ...s.turns.map((turn,i)=>{
         const text = s.finalDedup?.index === i && (s.candidate === s.finalDedup.text || s.proposal === s.finalDedup.text) ? turn.text.replace(s.finalDedup.text,'').trim() : turn.text
         return text ? jsx('div',{className:`pr-prose pr-turn pr-turn-${turn.role}`,role:'group','aria-label':turn.role === 'user' ? 'You' : 'Refiner','data-selectable-text':'true',children:text},i) : null
@@ -452,7 +473,7 @@ function Panel({controller, store, ctx}) {
       s.reportedRoute && jsx('p',{className:'text-xs text-(--ui-text-tertiary)',children:`Reported by Hermes: ${s.reportedRoute.provider || 'unknown'} / ${s.reportedRoute.model || 'unknown'}`}),
       s.showCandidate && jsxs('div',{className:'mt-4 space-y-2',children:[
         jsxs('label',{className:'flex flex-col gap-1',children:['Final prompt',jsx(Textarea,{className:'pr-prose pr-final',rows:1,value:s.candidate,onChange:e=>{if(sameDiscussion(controller.getState()))controller.editCandidate(e.target.value)}})]}),
-        button('Copy prompt',()=>{const current=controller.getState();if(sameDiscussion(current) && current.candidate && current.candidate === s.candidate)void controller.copy()},!s.candidate)
+        button('Copy Prompt & Close',()=>copyPrompt(s),!s.candidate || !!s.job)
       ]}),
       s.proposal !== null && jsxs('div',{children:[jsx('p',{children:'A new proposal arrived after your edit:'}),prose(s.proposal),button('Apply proposal',()=>{if(sameDiscussion(controller.getState()))controller.applyProposal()})]}),
       showRecovery && jsxs('div',{className:'space-y-2',children:[s.error && jsx('p',{role:'alert',children:s.error}),button('Refresh route',()=>{if(canEdit(controller.getState()))void controller.refreshRoute()},!!s.job)]})
@@ -473,40 +494,51 @@ export default {
   description:'Adds a Refine button beside your draft. Discuss changes in a side pane and copy the version you want.',
   register(ctx) {
     const store = atom(initial())
-    let disposed = false, metadata = null, pending = null, closeWorkspace = null
-    async function refreshMetadata() {
-      if (disposed) return
-      const epoch = gatewayActivationEpoch()
-      if (pending?.epoch === epoch) return
-      const refresh = {epoch}
-      pending = refresh
+    const visibility = host.paneVisibility?.(paneId)
+    let visibilityRevision = 0
+    const unlistenVisibility = visibility?.listen(() => { visibilityRevision++ })
+    let disposed = false, metadata = null, routeScan = 0, workspace = null
+    async function discoverRoutes(epoch) {
+      const scan = ++routeScan
       metadata = null
-      try {
-        const routes = await host.profileRoutes()
-        if (!disposed && pending === refresh && epoch === gatewayActivationEpoch() && Array.isArray(routes)) metadata = {epoch, routes:snapshotValue(routes)}
-      } catch {} finally { if (pending === refresh) pending = null }
+      const routes = await host.profileRoutes()
+      const inventory = Array.isArray(routes) ? snapshotValue(routes) : null
+      if (!disposed && scan === routeScan && epoch === gatewayActivationEpoch() && inventory) metadata = {epoch, routes:inventory}
+      return inventory
     }
-    const controller = createController({captureOrigin:source=>captureOrigin(source,metadata,refreshMetadata), requestProfile:routed, readSelectedFile:item=>readFile(ctx,item), writeClipboard:text=>ctx.os.writeClipboard(text), queryClient, newId:()=>crypto.randomUUID(), publish:value=>store.set(value)})
+    const controller = createController({captureOrigin:(source,isCurrent)=>captureOrigin(source,isCurrent,metadata?.epoch === source.epoch ? metadata.routes : null,discoverRoutes), describeOrigin:origin=>host.requestProfile(origin.route,prefix + 'describe',{protocol_version:2},undefined,{spawnPriority:'foreground'}), requestProfile:routed, readSelectedFile:item=>readFile(ctx,item), writeClipboard:text=>ctx.os.writeClipboard(text), queryClient, newId:()=>crypto.randomUUID(), publish:value=>store.set(value)})
     function Action() {
       return jsx(Button,{type:'button',style:{padding:'.3125rem .625rem'},onClick:()=>{
         if (disposed) return
-        const source = snapshot()
-        if (!controller.getState().origin && metadata?.epoch !== source.epoch) {
-          void refreshMetadata()
-          host.notify({kind:'info',message:'Refiner isn’t ready yet. Click Refine again in a moment.'})
+        if (workspace) {
+          if (visibility?.get() === false) host.revealPane(paneId)
+          else workspace.close?.()
           return
         }
         if (typeof host.openWorkspace !== 'function' || typeof host.revealPane !== 'function') { host.notify({kind:'error',message:'This Hermes Desktop cannot open the refiner pane.'}); return }
-        if (closeWorkspace) host.revealPane('plugin-workspace:prompt-refiner')
-        else {
-          try { closeWorkspace = host.openWorkspace('prompt-refiner',{title:'Prompt Refiner',dock:{pane:'workspace',pos:'right'},minWidth:'min(26rem, 45vw)',render:()=>jsx(Panel,{controller,store,ctx}),onClose:()=>{closeWorkspace=null}}) }
-          catch { host.notify({kind:'error',message:'Could not open the refiner pane.'}); return }
+        const source = controller.getState().origin ? null : snapshot()
+        let sourceChanged = false
+        const watched = source ? [host.state.focusedSessionOwner,host.state.focusedStoredSessionId,host.state.focusedSessionId].map(atom => atom.listen(() => { if (!sameSnapshot(source,snapshot())) sourceChanged = true })) : []
+        const stopWatching = () => { for (const unlisten of watched.splice(0)) unlisten() }
+        const panel = {close:null}
+        workspace = panel
+        const onClose = () => {
+          stopWatching()
+          if (workspace === panel) { workspace = null; controller.cancelOpen() }
         }
-        void controller.open(source)
+        const copyPrompt = expected => {
+          const visit = visibilityRevision
+          const isCurrent = () => workspace === panel && visibility?.get() !== false && visit === visibilityRevision
+          void controller.copy(expected,isCurrent,() => { if (isCurrent()) panel.close?.() })
+        }
+        try {
+          panel.close = host.openWorkspace(workspaceId,{title:'Prompt Refiner',dock:{pane:'workspace',pos:'right'},width:'25vw',height:'25vh',minWidth:'min(15rem, 20vw)',render:()=>jsx(Panel,{controller,store,ctx,copyPrompt}),onClose})
+        } catch { onClose(); host.notify({kind:'error',message:'Could not open the refiner pane.'}); return }
+        if (source && workspace === panel) void controller.open(source,() => !disposed && workspace === panel && !sourceChanged && sameSnapshot(source,snapshot())).finally(stopWatching)
       },children:'Refine'})
     }
     ctx.register({id:'refine',area:COMPOSER_AREAS.actions,render:()=>jsx(Action,{})})
-    ctx.onDispose(()=>{ disposed = true; metadata = null; pending = null; controller.dispose(); if (closeWorkspace) { const close=closeWorkspace; closeWorkspace=null; close() } })
-    void refreshMetadata()
+    ctx.onDispose(()=>{ disposed = true; metadata = null; unlistenVisibility?.(); controller.dispose(); workspace?.close?.() })
+    void Promise.resolve().then(() => { if (!disposed && routeScan === 0) return discoverRoutes(gatewayActivationEpoch()) }).catch(() => {})
   }
 }

@@ -21,7 +21,8 @@ async function load({selectionOnly = true, oldSdk = false} = {}) {
   const route = {connectionId:'conn',mode:'remote',profile:'profile',targetProfile:'target'}
   const state = {focusedSessionOwner:makeAtom({connectionId:'conn',profile:'profile'}),focusedStoredSessionId:makeAtom(null),focusedSessionId:makeAtom(null)}
   let catalogData = {providers:[{slug:'openai-codex',name:'openai-codex',capabilities:{'fixture-model':{reasoning:true,can_disable_reasoning:true}}}]}, statusResult = {}, epoch = 1, draft = async () => 'stored draft', routes = async () => [route], request = async () => ({ok:true,data:description})
-  const host = {state,composer:{getDraft:id=>draft(id),setDraft:(...args)=>composerWrites.push(args)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},openWorkspace:(id,options)=>{const workspace={id,...options,closed:false};workspaces.push(workspace);contributions[0]=workspace;return ()=>{workspace.closed=true;options.onClose()}},revealPane:id=>reveals.push(id),navigate:path=>navigations.push(path),notify:notice=>notices.push(notice)}
+  const visibility = makeAtom(false)
+  const host = {state,composer:{getDraft:id=>draft(id),setDraft:(...args)=>composerWrites.push(args)},profileRoutes:()=>routes(),requestProfile:(...args)=>{requests.push(args);return request(...args)},openWorkspace:(id,options)=>{const workspace={id,...options,closed:false,close(){workspace.closed=true;visibility.set(false);options.onClose()}};workspaces.push(workspace);contributions[0]=workspace;visibility.set(true);return workspace.close},paneVisibility:()=>visibility,revealPane:id=>{reveals.push(id);visibility.set(true)},navigate:path=>navigations.push(path),notify:notice=>notices.push(notice)}
   const cache = {cancelQueries:q=>{cancellations.push(plain(q));return Promise.resolve()},removeQueries:q=>removals.push(plain(q))}
   const sdk = {atom:makeAtom,useValue:a=>a.get(),useQuery:o=>{options.push(o);return o.queryKey[1]==='model-options'?{data:catalogData}:o.enabled?statusResult:{}},queryClient:cache,host,gatewayActivationEpoch:()=>epoch,COMPOSER_AREAS:{actions:'composer.actions'},Button:function Button(){},Textarea:function Textarea(){},Checkbox:function Checkbox(){},DropdownMenu:function DropdownMenu(){},DropdownMenuTrigger:function DropdownMenuTrigger(){},DropdownMenuContent:function DropdownMenuContent(){},DropdownMenuItem:function DropdownMenuItem(){},Dialog:function Dialog(){},DialogContent:function DialogContent(){},DialogTitle:function DialogTitle(){},ModelCatalogMenu:function ModelCatalogMenu(){},ModelMenuCloseContext:{Provider:function Provider(){}},REASONING_EFFORTS:['minimal','low','medium','high','xhigh','max','ultra'],REASONING_EFFORT_VALUES:['none','minimal','low','medium','high','xhigh','max','ultra'],catalogProviderMatches:(p,v)=>p.slug===v||p.name===v||p.aliases?.includes(v),reasoningEffortLabel:value=>value === 'none'?'Off':value ? value[0].toUpperCase()+value.slice(1) : ''}
   sdk.Codicon = function Codicon(){}
@@ -41,7 +42,7 @@ async function load({selectionOnly = true, oldSdk = false} = {}) {
   })
   await mod.evaluate()
   const ctx = {register:c=>contributions.push(c),onDispose:f=>disposers.push(f),os:{writeClipboard:async()=>true},files:{}}
-  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,workspaces,notices,host,state,route,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setStatusResult:v=>{statusResult=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
+  return {mod,ctx,contributions,requests,options,cache,composerWrites,removals,cancellations,navigations,reveals,workspaces,notices,host,state,route,visibility,get bitmapCalls(){return bitmapCalls},setSelectionOnly:v=>{sdk.MODEL_CATALOG_CAPABILITIES.selectionOnly=v},enableEffects:()=>{effectsEnabled=true},flushEffects:()=>{const work=pendingEffects;pendingEffects=[];work.forEach(fn=>fn())},render:()=>{hook=0;effectHook=0;const pane=contributions[0].render();return pane.type(pane.props)},setCatalog:v=>{catalogData=v},setStatusResult:v=>{statusResult=v},setEpoch:v=>{epoch=v},setDraft:v=>{draft=v},setRoutes:v=>{routes=v},setRequest:v=>{request=v},disposers}
 }
 function fixture(mod, overrides={}) {
   let current, n=0
@@ -278,7 +279,7 @@ test('only plain Enter in the message editor sends',async()=>{
 })
 
 test('discussion, correction and final remain distinct and only final is copied',async()=>{
-  const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return true}
+  const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return false}
   f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async()=> 'original private draft')
   f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,prepared:p.input,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick()
@@ -286,9 +287,9 @@ test('discussion, correction and final remain distinct and only final is copied'
   const controller=f.contributions[0].render().props.controller
   const finish=(reply,candidate,reported_route={provider:null,model:null})=>{const identity=controller.getState().job.identity;controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:reply,candidate_prompt:candidate,reported_route,usage:null,cost:null},error:null}},identity)}
   const first=f.requests.find(r=>r[1].endsWith('prepare'))[2].input;assert.equal(first.original_draft,'');assert.equal(first.user_input,'edited draft');assert.equal(JSON.stringify(first).includes('original private draft'),false)
-  finish('Working draft one. What format?',null);let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft one. What format?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
+  finish('Working draft one. What format?',null);let all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft one. What format?'));assert.equal(all.some(n=>n.props?.children==='Copy Prompt & Close'),false)
   typeMessage(f,'Use a table');review(f);await tick();const second=f.requests.filter(r=>r[1].endsWith('prepare')).at(-1)[2].input;assert.deepEqual(plain(second.turns),[{role:'user',text:'edited draft'},{role:'assistant',text:'Working draft one. What format?'}]);finish('Working draft two. Anything else?',null,{provider:'review-provider',model:'review-model'})
-  all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft two. Anything else?'));assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false)
+  all=nodes(f.render());assert.ok(all.some(n=>n.props?.children==='Working draft two. Anything else?'));assert.equal(all.some(n=>n.props?.children==='Copy Prompt & Close'),false)
   assert.ok(all.some(n=>n.props?.children==='Reported by Hermes: review-provider / review-model'))
   typeMessage(f,'Approved');review(f);await tick();finish('Final wording\nReady.','Final wording');all=nodes(f.render())
   assert.equal(all.some(n=>typeof n.props?.children==='string' && n.props.children.startsWith('Reported by Hermes:')),false)
@@ -299,8 +300,8 @@ test('discussion, correction and final remain distinct and only final is copied'
   assert.match(turns.at(-2).props.className,/\bpr-turn-user\b/);assert.doesNotMatch(turns.at(-1).props.className,/\bpr-turn-user\b/)
   assert.ok(turns.every(n=>n.props['data-selectable-text']==='true'))
   assert.equal(all.some(n=>['You','Refiner','Final wording'].includes(n.props?.children)),false)
-  const oldCopy=all.find(n=>n.props?.children==='Copy prompt');oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording'])
-  typeMessage(f,'Change the tone');review(f);await tick();finish('New working draft. Is this tone right?',null);all=nodes(f.render());assert.equal(all.some(n=>n.props?.children==='Copy prompt'),false);assert.ok(all.some(n=>n.props?.children==='New working draft. Is this tone right?'));oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording']);assert.deepEqual(f.composerWrites,[])
+  const oldCopy=all.find(n=>n.props?.children==='Copy Prompt & Close');oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording'])
+  typeMessage(f,'Change the tone');review(f);await tick();finish('New working draft. Is this tone right?',null);all=nodes(f.render());assert.equal(all.some(n=>n.props?.children==='Copy Prompt & Close'),false);assert.ok(all.some(n=>n.props?.children==='New working draft. Is this tone right?'));oldCopy.props.onClick();await tick();assert.deepEqual(copies,['Final wording']);assert.deepEqual(f.composerWrites,[])
 })
 
 for (const change of ['discard','selection','refresh']) {
@@ -432,14 +433,26 @@ test('unsupported controls are disabled and resize works by keyboard and pointer
   assert.equal(messageInput(f).props.style['--pr-input-height'],'78px')
 })
 
-test('native pane is docked beside chat and revealed only by the action',async()=>{
-  const f=await load();f.mod.namespace.default.register(f.ctx);await tick()
+test('Refine closes the active workspace, reveals an inactive one and preserves the discussion',async()=>{
+  const f=await load();let sweeps=0;f.setRoutes(async()=>{sweeps++;return [f.route]});f.mod.namespace.default.register(f.ctx);await tick()
   assert.equal(f.workspaces.length,0);assert.deepEqual(f.reveals,[])
   actionButton(f).props.onClick()
-  assert.equal(f.workspaces.length,1);assert.deepEqual(plain(f.workspaces[0].dock),{pane:'workspace',pos:'right'});assert.equal(f.workspaces[0].minWidth,'min(26rem, 45vw)')
-  await tick();await tick();typeMessage(f,'keep this');actionButton(f).props.onClick();assert.equal(f.workspaces.length,1);assert.deepEqual(f.reveals,['plugin-workspace:prompt-refiner'])
-  f.workspaces[0].onClose();actionButton(f).props.onClick();assert.equal(f.workspaces.length,2);assert.equal(nodes(f.render()).find(n=>n.props?.['aria-label']==='Message the refiner').props.value,'keep this')
-  f.disposers[0]();assert.equal(f.workspaces[1].closed,true);actionButton(f).props.onClick();assert.equal(f.workspaces.length,2)
+  assert.equal(f.workspaces.length,1);assert.deepEqual(plain(f.workspaces[0].dock),{pane:'workspace',pos:'right'})
+  await tick();typeMessage(f,'keep this');const readySweeps=sweeps,readyRequests=f.requests.length
+  f.visibility.set(false);actionButton(f).props.onClick()
+  assert.equal(f.workspaces.length,1);assert.equal(f.workspaces[0].closed,false);assert.deepEqual(f.reveals,['plugin-workspace:prompt-refiner'])
+  actionButton(f).props.onClick();assert.equal(f.workspaces[0].closed,true)
+  actionButton(f).props.onClick();assert.equal(f.workspaces.length,2);assert.equal(messageInput(f).props.value,'keep this')
+  f.workspaces[0].onClose();f.workspaces[1].close();actionButton(f).props.onClick()
+  assert.equal(f.workspaces.length,3);assert.equal(messageInput(f).props.value,'keep this')
+  await tick();assert.equal(sweeps,readySweeps);assert.equal(f.requests.length,readyRequests)
+  f.disposers[0]();assert.equal(f.workspaces[2].closed,true);actionButton(f).props.onClick();assert.equal(f.workspaces.length,3)
+})
+
+test('workspace size requests a quarter viewport and leaves a separate smaller floor',async()=>{
+  const f=await load();f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick()
+  const workspace=f.workspaces[0]
+  assert.deepEqual([workspace.width,workspace.height,workspace.minWidth],['25vw','25vh','min(15rem, 20vw)'])
 })
 
 test('production history picker selects only checked messages and settings action navigates',async()=>{
@@ -517,16 +530,18 @@ test('oversized image header is refused before browser decoding',async()=>{
 })
 
 
-test('warmed stored capture initiates draft read synchronously before route revalidation',async()=>{
+test('warmed stored capture reads synchronously and reaches ready with one post-draft sweep',async()=>{
   const f=await load(), events=[], wait=deferred()
   f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime')
   f.setRoutes(()=>{events.push('routes');return Promise.resolve([f.route])})
   f.setDraft(id=>{events.push(`draft:${id}`);return wait.promise})
+  f.setRequest(async(route,method,params)=>{events.push(method);assert.deepEqual(plain(params),{protocol_version:2});return {ok:true,data:description}})
   f.mod.namespace.default.register(f.ctx);await tick();events.length=0
   actionButton(f).props.onClick()
   assert.deepEqual(events,['draft:stored'])
   wait.resolve('draft');await tick();await tick()
-  assert.ok(events.includes('routes'));assert.equal(f.requests.length,1)
+  assert.deepEqual(events,['draft:stored','routes','plugin.prompt-refiner.describe']);assert.equal(messageInput(f).props.value,'draft')
+  assert.equal(f.contributions[0].render().props.controller.getState().routeState,'ready')
 })
 
 test('opening the pane cannot redirect draft capture to a different focused chat',async()=>{
@@ -536,50 +551,88 @@ test('opening the pane cannot redirect draft capture to a different focused chat
   f.host.openWorkspace=(...args)=>{f.state.focusedStoredSessionId.set('other');f.state.focusedSessionId.set('other-runtime');return open(...args)}
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
   assert.deepEqual(reads,[]);assert.equal(f.requests.length,0)
-  assert.ok(nodes(f.render()).some(n=>n.props?.role==='alert' && n.props.children.includes('Click Refine')))
+  assert.ok(nodes(f.render()).some(n=>n.props?.role==='alert' && n.props.children.includes('Refine again')))
 })
 
-test('cold Refine stays the only action and never queues capture on retry',async()=>{
-  const f=await load(), wait=deferred(), retry=deferred(), reads=[];let routeCalls=0
-  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(id=>{reads.push(id);return Promise.resolve('secret')});f.setRoutes(()=>{routeCalls++;return wait.promise})
+test('one cold click opens immediately and reaches manual entry with one route sweep',async()=>{
+  const f=await load(), discovery=deferred(), reads=[];let routeCalls=0
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async id=>{reads.push(id);return 'secret'});f.setRoutes(()=>{routeCalls++;return discovery.promise})
   f.mod.namespace.default.register(f.ctx)
   assert.deepEqual(actionNodes(f).filter(n=>n.props?.onClick).map(n=>n.props.children),['Refine'])
   assert.notEqual(actionButton(f).props.disabled,true)
-  actionButton(f).props.onClick();actionButton(f).props.onClick();await tick()
-  assert.equal(routeCalls,1);assert.deepEqual(reads,[])
-  wait.resolve(null);await tick()
-  f.setRoutes(()=>{routeCalls++;return retry.promise})
-  assert.notEqual(actionButton(f).props.disabled,true);actionButton(f).props.onClick()
-  f.state.focusedStoredSessionId.set('other');f.state.focusedSessionId.set('other-runtime');retry.resolve([f.route]);await tick()
-  assert.equal(routeCalls,2);assert.deepEqual(reads,[]);assert.equal(f.workspaces.length,0);assert.equal(f.requests.length,0)
-  assert.ok(f.notices.some(n=>n.message.includes('Refine again')))
-  actionButton(f).props.onClick();assert.deepEqual(reads,['other']);await tick()
-  assert.equal(f.workspaces.length,1)
+  actionButton(f).props.onClick();assert.equal(f.workspaces.length,1)
+  assert.ok(nodes(f.render()).some(n=>n.props?.role==='status' && n.props.children==='Loading the refiner…'))
+  assert.deepEqual(reads,[]);assert.equal(f.requests.length,0)
+  discovery.resolve([f.route]);await tick()
+  assert.equal(routeCalls,1);assert.deepEqual(reads,[]);assert.equal(messageInput(f).props.value,'');assert.deepEqual(plain(f.requests.map(r=>r.slice(1,3))),[['plugin.prompt-refiner.describe',{protocol_version:2}]])
+  assert.equal(f.contributions[0].render().props.controller.getState().routeState,'ready')
 })
 
-test('epoch change during prewarm discards metadata and retry uses new epoch',async()=>{
-  const f=await load(), wait=deferred();let reads=0
-  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return Promise.resolve('secret')});f.setRoutes(()=>wait.promise)
-  f.mod.namespace.default.register(f.ctx);f.setEpoch(2);wait.resolve([f.route]);await tick()
-  assert.notEqual(actionButton(f).props.disabled,true);assert.equal(reads,0)
-  f.setRoutes(async()=>[f.route]);actionButton(f).props.onClick();await tick()
-  assert.equal(reads,0);assert.equal(f.workspaces.length,0)
-  actionButton(f).props.onClick();await tick();await tick();assert.equal(reads,1)
+test('cold click does not wait for or trust an older in-flight prewarm',async()=>{
+  const f=await load(), prewarm=deferred(), reads=[];let routeCalls=0
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async id=>{reads.push(id);return 'secret'});f.setRoutes(()=>++routeCalls===1?prewarm.promise:Promise.resolve([f.route]))
+  f.mod.namespace.default.register(f.ctx);await tick();assert.equal(routeCalls,1)
+  actionButton(f).props.onClick();await tick()
+  assert.equal(routeCalls,2);assert.equal(f.requests.length,1);assert.equal(f.workspaces.length,1);assert.deepEqual(reads,[]);assert.equal(messageInput(f).props.value,'')
+  prewarm.resolve([{...f.route,targetProfile:'stale-target'}]);await tick()
+  const controller=f.contributions[0].render().props.controller;assert.equal(controller.getState().origin.route.targetProfile,'target')
 })
 
-test('stale epoch and absent owner refuse before stored draft read',async()=>{
+for (const change of ['close','owner change','owner away and back','session change','epoch change','dispose']) {
+  test(`cold discovery does not read a draft or describe after ${change}`,async()=>{
+    const f=await load(), discovery=deferred();let reads=0
+    const owner=f.state.focusedSessionOwner.get()
+    f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async()=>{reads++;return 'secret'});f.setRoutes(()=>discovery.promise)
+    f.mod.namespace.default.register(f.ctx);actionButton(f).props.onClick();assert.equal(f.workspaces.length,1)
+    if (change === 'close') actionButton(f).props.onClick()
+    if (change === 'owner change' || change === 'owner away and back') f.state.focusedSessionOwner.set({connectionId:'other',profile:owner.profile})
+    if (change === 'owner away and back') f.state.focusedSessionOwner.set(owner)
+    if (change === 'session change') f.state.focusedStoredSessionId.set('other')
+    if (change === 'epoch change') f.setEpoch(2)
+    if (change === 'dispose') f.disposers[0]()
+    discovery.resolve([f.route]);await tick()
+    assert.equal(reads,0);assert.equal(f.requests.length,0);assert.equal(messageInput(f),undefined)
+  })
+}
+
+test('old-epoch warm metadata and absent owner cannot authorize a draft read',async()=>{
   const f=await load();let reads=0
-  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return Promise.resolve('secret')})
-  f.mod.namespace.default.register(f.ctx);await tick();const old=actionButton(f);f.setEpoch(2)
-  old.props.onClick();assert.equal(reads,0);assert.equal(f.workspaces.length,0);await tick()
-  f.state.focusedSessionOwner.set(null);actionButton(f).props.onClick();await tick();assert.equal(reads,0);assert.equal(f.requests.length,0)
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(async()=>{reads++;return 'secret'})
+  f.mod.namespace.default.register(f.ctx);await tick();f.setEpoch(2)
+  actionButton(f).props.onClick();await tick();assert.equal(reads,0);assert.equal(messageInput(f).props.value,'')
+  click(f,'Discard refinement');f.workspaces[0].close();f.state.focusedSessionOwner.set(null);actionButton(f).props.onClick();await tick()
+  assert.equal(reads,0);assert.equal(f.requests.length,1);assert.equal(messageInput(f),undefined)
 })
 
-test('post-read route mismatch suppresses stored draft and describe',async()=>{
-  const f=await load(), wait=deferred();f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>wait.promise)
-  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick()
-  f.setRoutes(async()=>[{...f.route,targetProfile:'other'}]);wait.resolve('secret');await tick();await tick()
-  assert.equal(f.requests.length,0);assert.equal(nodes(f.render()).some(n=>n.props?.value==='secret'),false)
+for (const change of ['target mismatch','duplicate owner','removed owner']) {
+  test(`post-read ${change} suppresses stored draft and describe`,async()=>{
+    const f=await load(), wait=deferred();let reads=0
+    f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setDraft(()=>{reads++;return wait.promise})
+    f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();assert.equal(reads,1)
+    const other={...f.route,targetProfile:'other'}
+    f.setRoutes(async()=>change==='target mismatch'?[other]:change==='duplicate owner'?[f.route,other]:[])
+    wait.resolve('secret');await tick()
+    assert.equal(f.requests.length,0);assert.equal(messageInput(f),undefined)
+  })
+}
+
+test('reopening during a pending draft read captures only the new click',async()=>{
+  const f=await load(),wait=deferred(),reads=[];let sweeps=0
+  f.state.focusedStoredSessionId.set('first');f.state.focusedSessionId.set('runtime');f.setDraft(id=>{reads.push(id);return id==='first'?wait.promise:Promise.resolve('new draft')})
+  f.setRoutes(async()=>{sweeps++;return [f.route]});f.mod.namespace.default.register(f.ctx);await tick()
+  actionButton(f).props.onClick();assert.deepEqual(reads,['first']);f.workspaces[0].close()
+  f.state.focusedStoredSessionId.set('second');actionButton(f).props.onClick();assert.deepEqual(reads,['first','second']);await tick()
+  assert.equal(messageInput(f).props.value,'new draft');assert.equal(f.requests.length,1);assert.equal(sweeps,2)
+  wait.resolve('obsolete draft');await tick();assert.equal(messageInput(f).props.value,'new draft');assert.equal(f.requests.length,1);assert.equal(sweeps,2)
+})
+
+test('closing after capture preserves the draft and does not repeat a pending describe',async()=>{
+  const f=await load(),describe=deferred();let sweeps=0
+  f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');f.setRequest(()=>describe.promise);f.setRoutes(async()=>{sweeps++;return [f.route]})
+  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+  assert.equal(f.requests.length,1);assert.equal(messageInput(f).props.value,'stored draft');f.workspaces[0].close()
+  actionButton(f).props.onClick();assert.equal(messageInput(f).props.value,'stored draft');await tick();assert.equal(sweeps,2);assert.equal(f.requests.length,1)
+  describe.resolve({ok:true,data:description});await tick();assert.equal(f.contributions[0].render().props.controller.getState().routeState,'ready')
 })
 
 test('dispose suppresses pending prewarm completion',async()=>{
@@ -804,14 +857,39 @@ test('panel removes selected context and files before preview',async()=>{
   const input=f.requests.find(r=>r[1].endsWith('prepare'))[2].input;assert.deepEqual(plain(input.source_messages),[]);assert.deepEqual(plain(input.files),[])
 })
 
-test('panel copy sends only candidate text and reports clipboard acknowledgement',async()=>{
-  const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return true};f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime');
+test('acknowledged copy sends only candidate text, closes and clears the discussion',async()=>{
+  const f=await load(),copies=[],clipboard=deferred();let sweeps=0;f.ctx.os.writeClipboard=text=>{copies.push(text);return clipboard.promise};f.state.focusedStoredSessionId.set('stored');f.state.focusedSessionId.set('runtime')
+  f.setRoutes(async()=>{sweeps++;return [f.route]})
   f.setRequest(async(r,m,p)=>m.endsWith('describe')?{ok:true,data:description}:m.endsWith('prepare')?{ok:true,data:{...golden,input_revision:p.input_revision,expected_route:p.expected_route,execution:p.execution,redacted:false}}:m.endsWith('start')?{ok:true,data:{identity:p.identity,handle:{job_id:'a'.repeat(32),result_capability:'A'.repeat(43)}}}:{ok:true,data:{released:true,abandoned:false}})
   f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();typeMessage(f,'hello');review(f);await tick()
   const pane=f.contributions[0].render(),controller=pane.props.controller,identity=controller.getState().job.identity
   controller.acceptStatus({ok:true,data:{identity,state:'succeeded',result:{assistant_reply:'Reply',candidate_prompt:'candidate only',reported_route:{provider:null,model:null},usage:null,cost:null},error:null}},identity)
-  click(f,'Copy prompt');await tick();assert.deepEqual(copies,['candidate only']);assert.deepEqual(f.composerWrites,[]);assert.ok(nodes(f.render()).some(n=>n.props?.children==='Copied prompt. Paste it and reattach any required files yourself.'))
+  const clickCopy=nodes(f.render()).find(n=>n.props?.children==='Copy Prompt & Close')
+  assert.ok(clickCopy);clickCopy.props.onClick();clickCopy.props.onClick();await tick();assert.deepEqual(copies,['candidate only']);assert.deepEqual(f.composerWrites,[]);assert.equal(f.workspaces[0].closed,false)
+  clipboard.resolve(true);await tick();assert.equal(f.workspaces[0].closed,true);assert.equal(controller.getState().origin,null);assert.equal(controller.getState().turns.length,0)
+  const afterCopySweeps=sweeps,afterCopyRequests=f.requests.length
+  f.setDraft(async()=> 'new draft');actionButton(f).props.onClick();await tick()
+  assert.equal(messageInput(f).props.value,'new draft');assert.equal(controller.getState().candidate,'');assert.equal(controller.getState().turns.length,0)
+  assert.equal(controller.getState().routeState,'ready');assert.equal(sweeps-afterCopySweeps,1);assert.deepEqual(plain(f.requests.slice(afterCopyRequests).map(r=>r.slice(1,3))),[['plugin.prompt-refiner.describe',{protocol_version:2}]])
 })
+
+for (const change of ['candidate edit and revert','input revision','close and reopen','hide and reveal','discard and reopen','dispose']) {
+  test(`late clipboard success cannot clear work after ${change}`,async()=>{
+    const f=await load(),clipboard=deferred();let writes=0;f.ctx.os.writeClipboard=()=>{writes++;return clipboard.promise}
+    f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick()
+    const controller=f.contributions[0].render().props.controller;controller.editCandidate('copy this')
+    const copy=nodes(f.render()).find(n=>n.props?.children==='Copy Prompt & Close').props.onClick;copy();assert.equal(writes,1)
+    if (change === 'candidate edit and revert') {controller.editCandidate('new edit');controller.editCandidate('copy this')}
+    if (change === 'input revision') typeMessage(f,'new input')
+    if (change === 'close and reopen') {f.workspaces[0].close();actionButton(f).props.onClick()}
+    if (change === 'hide and reveal') {f.visibility.set(false);actionButton(f).props.onClick()}
+    if (change === 'discard and reopen') {click(f,'Discard refinement');f.workspaces[0].close();actionButton(f).props.onClick();await tick();controller.editCandidate('copy this')}
+    if (change === 'dispose') f.disposers[0]()
+    const current=controller.getState();clipboard.resolve(true);await tick();assert.equal(controller.getState(),current)
+    assert.equal(f.workspaces.at(-1).closed,change==='dispose')
+    if (change === 'close and reopen' || change === 'discard and reopen' || change === 'dispose') {copy();assert.equal(writes,1)}
+  })
+}
 
 test('final prompt is a self-sizing wrapped editor with exact copy after clearing and retyping',async()=>{
   const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return true}
@@ -825,12 +903,12 @@ test('final prompt is a self-sizing wrapped editor with exact copy after clearin
   assert.match(css,/\.pr-final\{[^}]*field-sizing:content[^}]*max-height:calc\(20lh[^}]*overflow:hidden auto/)
   editor().props.onChange({target:{value:''}})
   assert.equal(editor().props.value,'')
-  const emptyCopy=nodes(f.render()).find(n=>n.props?.children==='Copy prompt')
+  const emptyCopy=nodes(f.render()).find(n=>n.props?.children==='Copy Prompt & Close')
   assert.equal(emptyCopy.props.disabled,true);emptyCopy.props.onClick();await tick();assert.deepEqual(copies,[])
   const edited='  leading\n\ntrailing  \n'
   editor().props.onChange({target:{value:edited}})
   assert.equal(editor().props.value,edited)
-  click(f,'Copy prompt');await tick();assert.deepEqual(copies,[edited]);assert.deepEqual(f.composerWrites,[])
+  click(f,'Copy Prompt & Close');await tick();assert.deepEqual(copies,[edited]);assert.deepEqual(f.composerWrites,[])
 })
 
 
@@ -915,8 +993,12 @@ test('resize grip reports measured height and manual size resets on completed se
 })
 
 
-test('panel copy failure leaves candidate visible and does not write composer',async()=>{
-  const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);return false}
-  f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();await tick();const controller=f.contributions[0].render().props.controller;controller.editCandidate('text only')
-  assert.deepEqual(copies,[]);click(f,'Copy prompt');await tick();assert.deepEqual(copies,['text only']);assert.deepEqual(f.composerWrites,[]);assert.ok(nodes(f.render()).some(n=>n.props?.children==='Clipboard unavailable. Select text manually.'));assert.equal(controller.getState().candidate,'text only')
-})
+for (const failure of [false, 'truthy reply', new Error('private clipboard detail')]) {
+  test(`unacknowledged clipboard write (${typeof failure}) preserves the pane and allows retry`,async()=>{
+    const f=await load(),copies=[];f.ctx.os.writeClipboard=async text=>{copies.push(text);if(copies.length>1)return true;if(failure instanceof Error)throw failure;return failure}
+    f.mod.namespace.default.register(f.ctx);await tick();actionButton(f).props.onClick();await tick();const controller=f.contributions[0].render().props.controller;controller.editCandidate('text only');typeMessage(f,'keep this too')
+    assert.deepEqual(copies,[]);click(f,'Copy Prompt & Close');await tick()
+    assert.deepEqual(copies,['text only']);assert.deepEqual(f.composerWrites,[]);assert.match(controller.getState().error,/^Clipboard unavailable/);assert.equal(controller.getState().candidate,'text only');assert.equal(messageInput(f).props.value,'keep this too');assert.equal(f.workspaces[0].closed,false)
+    click(f,'Copy Prompt & Close');await tick();assert.deepEqual(copies,['text only','text only']);assert.equal(f.workspaces[0].closed,true)
+  })
+}
